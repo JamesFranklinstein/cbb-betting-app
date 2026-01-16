@@ -155,6 +155,16 @@ class TeamStats:
         return self.adj_em
 
     @property
+    def effective_height(self) -> float:
+        """Height weighted by roster continuity.
+
+        Teams with more returning players have more stable/reliable height metrics.
+        """
+        if self.avg_height > 0 and self.continuity > 0:
+            return self.avg_height * (self.continuity / 100)
+        return self.avg_height
+
+    @property
     def is_trending_up(self) -> bool:
         """Whether team is improving (positive AdjEM trend)."""
         return self.adj_em_trend > 0.5  # At least 0.5 point improvement
@@ -175,6 +185,21 @@ class TeamStats:
             return "average"
         else:
             return "weak"
+
+    @property
+    def height_tier(self) -> str:
+        """Categorize team height (D1 average is ~77 inches / 6'5").
+
+        Used for identifying height mismatches between teams.
+        """
+        if self.avg_height >= 79:  # 6'7" or taller
+            return "tall"
+        elif self.avg_height >= 77:  # 6'5" to 6'7"
+            return "average"
+        elif self.avg_height >= 75:  # 6'3" to 6'5"
+            return "short"
+        else:
+            return "very_short"
 
 
 @dataclass

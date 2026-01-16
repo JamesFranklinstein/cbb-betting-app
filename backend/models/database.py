@@ -271,33 +271,118 @@ class BettingResult(Base):
 class MLModelVersion(Base):
     """Track ML model versions and performance."""
     __tablename__ = "ml_model_versions"
-    
+
     id = Column(Integer, primary_key=True)
     version = Column(String(50), unique=True, nullable=False)
-    
+
     # Model details
-    model_type = Column(String(100))  # e.g., 'XGBoost', 'RandomForest'
+    model_type = Column(String(100))  # e.g., 'XGBoost', 'RandomForest', 'PyTorch'
     features_used = Column(JSON)
     hyperparameters = Column(JSON)
-    
+
     # Training metrics
     train_accuracy = Column(Float)
     val_accuracy = Column(Float)
     train_log_loss = Column(Float)
     val_log_loss = Column(Float)
-    
+
     # Calibration metrics
     brier_score = Column(Float)
     calibration_error = Column(Float)
-    
+
+    # Spread/Total regression metrics
+    spread_mae = Column(Float)
+    total_mae = Column(Float)
+
     # Live performance
     live_accuracy = Column(Float)
     live_roi = Column(Float)
     total_predictions = Column(Integer, default=0)
-    
+
     is_active = Column(Boolean, default=False)
     trained_at = Column(DateTime)
     created_at = Column(DateTime, default=datetime.utcnow)
-    
+
     # Path to saved model file
     model_path = Column(String(500))
+
+
+class TrainingData(Base):
+    """Historical game data with predictions and outcomes for model training."""
+    __tablename__ = "training_data"
+
+    id = Column(Integer, primary_key=True)
+    game_id = Column(Integer, ForeignKey("games.id"), nullable=False)
+    season = Column(Integer, nullable=False)
+    game_date = Column(DateTime, nullable=False)
+
+    # Teams
+    home_team_id = Column(Integer, ForeignKey("teams.id"), nullable=False)
+    away_team_id = Column(Integer, ForeignKey("teams.id"), nullable=False)
+
+    # Features snapshot (JSON blob of all features at prediction time)
+    features = Column(JSON, nullable=False)
+
+    # Our ML predictions at game time
+    pred_home_win_prob = Column(Float)
+    pred_spread = Column(Float)
+    pred_total = Column(Float)
+    pred_model_version = Column(String(50))
+
+    # KenPom predictions for comparison
+    kenpom_home_win_prob = Column(Float)
+    kenpom_spread = Column(Float)
+    kenpom_total = Column(Float)
+
+    # Actual outcomes
+    actual_home_score = Column(Integer)
+    actual_away_score = Column(Integer)
+    actual_spread = Column(Float)  # home_score - away_score
+    actual_total = Column(Float)   # home_score + away_score
+    home_won = Column(Boolean)
+
+    # Error metrics (for analysis)
+    spread_error = Column(Float)   # pred_spread - actual_spread
+    total_error = Column(Float)    # pred_total - actual_total
+    prob_calibration_bucket = Column(Integer)  # 0-9 for 0-10%, 10-20%, etc.
+
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    # Relationships
+    game = relationship("Game")
+    home_team = relationship("Team", foreign_keys=[home_team_id])
+    away_team = relationship("Team", foreign_keys=[away_team_id])
+
+    __table_args__ = (
+        Index("idx_training_data_season", "season"),
+        Index("idx_training_data_date", "game_date"),
+        UniqueConstraint("game_id", name="unique_training_data_game"),
+    )
+
+
+class PredictionAudit(Base):
+    """Audit trail of all predictions for tracking accuracy over time."""
+    __tablename__ = "prediction_audit"
+
+    id = Column(Integer, primary_key=True)
+    prediction_id = Column(Integer, ForeignKey("predictions.id"), nullable=False)
+    model_version = Column(String(50), nullable=False)
+
+    # Prediction details
+    home_win_prob = Column(Float)
+    spread_pred = Column(Float)
+    total_pred = Column(Float)
+    confidence = Column(Float)
+
+    # Features used (for debugging)
+    features_hash = Column(String(64))  # SHA256 of features JSON
+
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    # Relationship
+    prediction = relationship("Prediction")
+
+    __table_args__ = (
+        Index("idx_prediction_audit_version", "model_version"),
+        Index("idx_prediction_audit_created", "created_at"),
+    )

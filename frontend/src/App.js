@@ -87,6 +87,13 @@ function App() {
         // Storage endpoint may fail silently
       }
 
+      // Fetch and update results for completed games (before loading history)
+      try {
+        await axios.post(`${API_BASE}/api/bet-history/fetch-results`);
+      } catch {
+        // Results fetch may fail silently
+      }
+
       // Fetch bet history and stats
       try {
         const [historyRes, statsRes] = await Promise.all([

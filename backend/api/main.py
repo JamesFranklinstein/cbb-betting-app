@@ -19,7 +19,7 @@ from clients import KenPomClient, OddsAPIClient
 from services import GameService
 from services.bet_history import BetHistoryService
 from ml import MLPredictor
-from models import init_db, get_db
+from models import init_db, get_db, SessionLocal
 
 # Configure logging
 logging.basicConfig(
@@ -641,6 +641,408 @@ async def get_pending_bets():
             for bet in pending
         ]
     except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ==================== ML MANAGEMENT ENDPOINTS ====================
+
+class MLVersionResponse(BaseModel):
+    """ML Model version information."""
+    model_config = {"protected_namespaces": ()}
+
+    version: str
+    model_type: str
+    brier_score: Optional[float] = None
+    accuracy: Optional[float] = None
+    spread_mae: Optional[float] = None
+    total_mae: Optional[float] = None
+    live_accuracy: Optional[float] = None
+    live_roi: Optional[float] = None
+    total_predictions: Optional[int] = None
+    is_active: bool
+    trained_at: Optional[str] = None
+    model_path: Optional[str] = None
+
+
+class MLCalibrationResponse(BaseModel):
+    """ML Model calibration metrics."""
+    model_config = {"protected_namespaces": ()}
+
+    model_version: Optional[str] = None
+    temperature: Optional[float] = None
+    calibration_buckets: List[dict] = []
+    overall_calibration_error: Optional[float] = None
+    brier_score: Optional[float] = None
+
+
+class MLFeedbackStatsResponse(BaseModel):
+    """ML Feedback loop statistics."""
+    total_training_samples: int = 0
+    samples_last_7_days: int = 0
+    samples_last_30_days: int = 0
+    accuracy_stats: dict = {}
+    avg_errors: dict = {}
+
+
+@app.get("/api/ml/versions", response_model=List[MLVersionResponse])
+async def get_ml_versions(
+    limit: int = Query(10, description="Maximum versions to return")
+):
+    """Get list of ML model versions with performance metrics."""
+    try:
+        from ml.version_manager import ModelVersionManager
+
+        session = SessionLocal()
+        try:
+            version_manager = ModelVersionManager(model_dir="./models", session=session)
+            versions = version_manager.list_versions(limit=limit)
+
+            return [
+                MLVersionResponse(
+                    version=v['version'],
+                    model_type=v['model_type'],
+                    brier_score=v.get('brier_score'),
+                    accuracy=v.get('accuracy'),
+                    spread_mae=v.get('spread_mae'),
+                    total_mae=v.get('total_mae'),
+                    live_accuracy=v.get('live_accuracy'),
+                    live_roi=v.get('live_roi'),
+                    total_predictions=v.get('total_predictions'),
+                    is_active=v['is_active'],
+                    trained_at=v.get('trained_at'),
+                    model_path=v.get('model_path')
+                )
+                for v in versions
+            ]
+        finally:
+            session.close()
+    except Exception as e:
+        logger.error(f"Error fetching ML versions: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/ml/versions/active", response_model=Optional[MLVersionResponse])
+async def get_active_ml_version():
+    """Get the currently active ML model version."""
+    try:
+        from ml.version_manager import ModelVersionManager
+
+        session = SessionLocal()
+        try:
+            version_manager = ModelVersionManager(model_dir="./models", session=session)
+            active = version_manager.get_active_version()
+
+            if not active:
+                return None
+
+            return MLVersionResponse(
+                version=active.version,
+                model_type=active.model_type,
+                brier_score=active.brier_score,
+                accuracy=active.val_accuracy,
+                spread_mae=active.spread_mae,
+                total_mae=active.total_mae,
+                live_accuracy=active.live_accuracy,
+                live_roi=active.live_roi,
+                total_predictions=active.total_predictions,
+                is_active=active.is_active,
+                trained_at=active.trained_at.isoformat() if active.trained_at else None,
+                model_path=active.model_path
+            )
+        finally:
+            session.close()
+    except Exception as e:
+        logger.error(f"Error fetching active ML version: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/ml/versions/{version}/activate")
+async def activate_ml_version(version: str):
+    """Activate a specific ML model version."""
+    try:
+        from ml.version_manager import ModelVersionManager
+
+        session = SessionLocal()
+        try:
+            version_manager = ModelVersionManager(model_dir="./models", session=session)
+            success = version_manager.activate_version(version)
+
+            if not success:
+                raise HTTPException(status_code=404, detail=f"Version {version} not found")
+
+            return {"message": f"Activated model version {version}", "version": version}
+        finally:
+            session.close()
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error activating ML version: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/ml/versions/compare")
+async def compare_ml_versions(
+    version_a: str = Query(..., description="First version to compare"),
+    version_b: str = Query(..., description="Second version to compare")
+):
+    """Compare two ML model versions."""
+    try:
+        from ml.version_manager import ModelVersionManager
+
+        session = SessionLocal()
+        try:
+            version_manager = ModelVersionManager(model_dir="./models", session=session)
+            comparison = version_manager.compare_versions(version_a, version_b)
+
+            if 'error' in comparison:
+                raise HTTPException(status_code=404, detail=comparison['error'])
+
+            return comparison
+        finally:
+            session.close()
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error comparing ML versions: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/ml/retrain")
+async def trigger_ml_retraining(
+    min_samples: int = Query(100, description="Minimum training samples required")
+):
+    """Trigger manual ML model retraining."""
+    try:
+        from ml.feedback_collector import FeedbackCollector
+        from ml.trainer import CBBModelTrainer
+        from ml.version_manager import ModelVersionManager
+
+        session = SessionLocal()
+        try:
+            # Get training data
+            collector = FeedbackCollector(session)
+            df = collector.get_training_dataframe()
+
+            if len(df) < min_samples:
+                return {
+                    "status": "skipped",
+                    "reason": "insufficient_data",
+                    "available_samples": len(df),
+                    "required_samples": min_samples
+                }
+
+            # Split data (time-based)
+            df = df.sort_values('game_date')
+            split_idx = int(len(df) * 0.8)
+            train_df = df.iloc[:split_idx]
+            val_df = df.iloc[split_idx:]
+
+            logger.info(f"Training on {len(train_df)} games, validating on {len(val_df)} games")
+
+            # Train new model
+            trainer = CBBModelTrainer(model_dir="./models")
+            metrics = trainer.train(
+                train_df=train_df,
+                val_df=val_df,
+                epochs=100,
+                patience=15
+            )
+
+            # Calibrate temperature
+            trainer.calibrate_temperature(val_df)
+
+            # Save and register version
+            version_str = f"v{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}_pytorch"
+            model_path = trainer.save_model(version_str)
+
+            version_manager = ModelVersionManager("./models", session)
+            version = version_manager.create_version(
+                model_type='PyTorch',
+                features=trainer.FEATURE_COLUMNS,
+                hyperparameters={
+                    'hidden_sizes': (64, 128, 64),
+                    'dropout': 0.3,
+                    'height_weight': trainer.height_weight,
+                },
+                training_metrics=metrics,
+                model_path=model_path
+            )
+
+            # Check if new model is better and activate if so
+            active_version = version_manager.get_active_version()
+            activated = False
+            if active_version:
+                if metrics['brier_score'] < (active_version.brier_score or 1.0) - 0.005:
+                    version_manager.activate_version(version_str)
+                    activated = True
+            else:
+                version_manager.activate_version(version_str)
+                activated = True
+
+            return {
+                "status": "success",
+                "version": version_str,
+                "activated": activated,
+                "metrics": metrics,
+                "training_samples": len(train_df),
+                "validation_samples": len(val_df)
+            }
+        finally:
+            session.close()
+    except Exception as e:
+        logger.error(f"Error during ML retraining: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/ml/calibration", response_model=MLCalibrationResponse)
+async def get_ml_calibration():
+    """Get calibration metrics for the active ML model."""
+    try:
+        from ml.version_manager import ModelVersionManager
+        from ml.feedback_collector import FeedbackCollector
+
+        session = SessionLocal()
+        try:
+            version_manager = ModelVersionManager(model_dir="./models", session=session)
+            active = version_manager.get_active_version()
+
+            if not active:
+                return MLCalibrationResponse(
+                    model_version=None,
+                    temperature=None,
+                    calibration_buckets=[],
+                    overall_calibration_error=None,
+                    brier_score=None
+                )
+
+            # Get calibration stats from feedback collector
+            collector = FeedbackCollector(session)
+            accuracy_stats = collector.get_accuracy_stats()
+
+            # Build calibration buckets
+            buckets = []
+            if 'calibration_buckets' in accuracy_stats:
+                buckets = accuracy_stats['calibration_buckets']
+
+            return MLCalibrationResponse(
+                model_version=active.version,
+                temperature=1.0,  # Would need to load from model
+                calibration_buckets=buckets,
+                overall_calibration_error=active.calibration_error,
+                brier_score=active.brier_score
+            )
+        finally:
+            session.close()
+    except Exception as e:
+        logger.error(f"Error fetching ML calibration: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/ml/feedback-stats", response_model=MLFeedbackStatsResponse)
+async def get_ml_feedback_stats():
+    """Get feedback loop statistics."""
+    try:
+        from ml.feedback_collector import FeedbackCollector
+        from models.database import TrainingData
+        from datetime import timedelta
+
+        session = SessionLocal()
+        try:
+            collector = FeedbackCollector(session)
+
+            # Get total samples
+            total_samples = session.query(TrainingData).count()
+
+            # Get samples from last 7 days
+            week_ago = datetime.utcnow() - timedelta(days=7)
+            samples_7d = session.query(TrainingData).filter(
+                TrainingData.created_at >= week_ago
+            ).count()
+
+            # Get samples from last 30 days
+            month_ago = datetime.utcnow() - timedelta(days=30)
+            samples_30d = session.query(TrainingData).filter(
+                TrainingData.created_at >= month_ago
+            ).count()
+
+            # Get accuracy stats
+            accuracy_stats = collector.get_accuracy_stats()
+
+            # Calculate average errors
+            avg_errors = {}
+            if total_samples > 0:
+                from sqlalchemy import func
+                error_stats = session.query(
+                    func.avg(TrainingData.win_error).label('avg_win_error'),
+                    func.avg(TrainingData.spread_error).label('avg_spread_error'),
+                    func.avg(TrainingData.total_error).label('avg_total_error')
+                ).first()
+
+                avg_errors = {
+                    'win_error': float(error_stats.avg_win_error or 0),
+                    'spread_error': float(error_stats.avg_spread_error or 0),
+                    'total_error': float(error_stats.avg_total_error or 0)
+                }
+
+            return MLFeedbackStatsResponse(
+                total_training_samples=total_samples,
+                samples_last_7_days=samples_7d,
+                samples_last_30_days=samples_30d,
+                accuracy_stats=accuracy_stats,
+                avg_errors=avg_errors
+            )
+        finally:
+            session.close()
+    except Exception as e:
+        logger.error(f"Error fetching ML feedback stats: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/ml/collect-feedback")
+async def collect_feedback(
+    days_back: int = Query(1, description="Number of days to look back")
+):
+    """Manually trigger feedback collection for completed games."""
+    try:
+        from ml.feedback_collector import FeedbackCollector
+
+        session = SessionLocal()
+        try:
+            collector = FeedbackCollector(session)
+            result = collector.run_collection(days_back=days_back, store=True)
+
+            return {
+                "status": "success",
+                "games_processed": result.get('games_processed', 0),
+                "new_training_samples": result.get('new_samples', 0),
+                "message": f"Collected feedback for {result.get('games_processed', 0)} games"
+            }
+        finally:
+            session.close()
+    except Exception as e:
+        logger.error(f"Error collecting feedback: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/ml/scheduler/status")
+async def get_scheduler_status():
+    """Get the status of the ML retraining scheduler."""
+    try:
+        # Check if scheduler is running (would need global scheduler instance)
+        # For now, return configuration info
+        return {
+            "feedback_collection": {
+                "schedule": "Daily at 11:59 PM",
+                "timezone": "America/New_York"
+            },
+            "model_retraining": {
+                "schedule": "Weekly on Sunday at 2:00 AM",
+                "timezone": "America/New_York"
+            },
+            "status": "Scheduler not started in serverless mode" if IS_SERVERLESS else "Check server logs"
+        }
+    except Exception as e:
+        logger.error(f"Error getting scheduler status: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 

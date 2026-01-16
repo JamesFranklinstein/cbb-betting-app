@@ -21,6 +21,13 @@ numpy==1.26.3
 scikit-learn==1.4.0
 joblib==1.3.2
 
+# Deep Learning (PyTorch)
+torch>=2.1.0
+torchmetrics>=1.2.0
+
+# Scheduling (for automated retraining)
+apscheduler>=3.10.4
+
 # CLI
 rich==13.7.0
 typer==0.9.0

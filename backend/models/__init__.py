@@ -8,6 +8,8 @@ from .database import (
     ValueBet,
     BettingResult,
     MLModelVersion,
+    TrainingData,
+    PredictionAudit,
 )
 from .connection import (
     engine,
@@ -29,6 +31,8 @@ __all__ = [
     "ValueBet",
     "BettingResult",
     "MLModelVersion",
+    "TrainingData",
+    "PredictionAudit",
     # Connection
     "engine",
     "SessionLocal",
