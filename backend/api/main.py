@@ -1,0 +1,829 @@
+"""
+FastAPI Backend
+
+REST API for the CBB Betting application.
+"""
+
+import asyncio
+import logging
+import os
+from datetime import date, datetime, timedelta
+from typing import List, Optional
+from contextlib import asynccontextmanager
+
+from fastapi import FastAPI, HTTPException, Query, Depends
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field
+
+from clients import KenPomClient, OddsAPIClient
+from services import GameService
+from services.bet_history import BetHistoryService
+from ml import MLPredictor
+from models import init_db, get_db
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+)
+logger = logging.getLogger(__name__)
+
+# CORS configuration - set allowed origins from environment or use defaults
+DEFAULT_ORIGINS = "http://localhost:3000,http://127.0.0.1:3000,https://frontend-indol-omega-55.vercel.app,https://cbb-betting-app.vercel.app"
+ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", DEFAULT_ORIGINS).split(",")
+
+# Check if running on Vercel (serverless)
+IS_SERVERLESS = os.getenv("VERCEL", "false").lower() == "1" or os.getenv("AWS_LAMBDA_FUNCTION_NAME") is not None
+
+
+# ==================== PYDANTIC MODELS ====================
+
+class ValueBetResponse(BaseModel):
+    model_config = {"protected_namespaces": ()}
+
+    home_team: str
+    away_team: str
+    bet_type: str
+    side: str
+    model_prob: float
+    market_odds: int
+    market_implied_prob: float
+    edge: float
+    ev: float
+    kelly_fraction: float
+    recommended_book: str
+    confidence: str
+    market_line: Optional[float] = None
+    model_line: Optional[float] = None
+
+
+class TeamStatsResponse(BaseModel):
+    """Full team statistics from KenPom."""
+    team_name: str
+    rank: int = 0
+    adj_em: float = 0.0
+    adj_oe: float = 0.0
+    adj_de: float = 0.0
+    adj_tempo: float = 0.0
+    efg_pct: float = 0.0
+    to_pct: float = 0.0
+    or_pct: float = 0.0
+    ft_rate: float = 0.0
+    d_efg_pct: float = 0.0
+    d_to_pct: float = 0.0
+    d_or_pct: float = 0.0
+    d_ft_rate: float = 0.0
+    sos: float = 0.0
+    luck: float = 0.0
+
+
+class StatDifferenceResponse(BaseModel):
+    """Statistical difference between two teams."""
+    stat_name: str
+    display_name: str
+    home_value: float
+    away_value: float
+    difference: float
+    advantage: str  # "home", "away", or "neutral"
+    significance: str  # "major", "moderate", "minor"
+    higher_is_better: bool = True
+
+
+class TeamStatComparisonResponse(BaseModel):
+    """Full statistical comparison between two teams."""
+    home_stats: TeamStatsResponse
+    away_stats: TeamStatsResponse
+    stat_differences: List[StatDifferenceResponse]
+    major_differences: List[StatDifferenceResponse]
+    efficiency_edge: str
+    tempo_mismatch: bool
+    shooting_edge: str
+    rebounding_edge: str
+    turnover_edge: str
+
+
+class GameAnalysisResponse(BaseModel):
+    home_team: str
+    away_team: str
+    game_time: datetime
+    home_rank: int
+    away_rank: int
+
+    kenpom_home_score: float
+    kenpom_away_score: float
+    kenpom_spread: float
+    kenpom_total: float
+    kenpom_home_win_prob: float
+    kenpom_tempo: float
+
+    vegas_spread: float
+    vegas_total: float
+    vegas_ml_home: int
+    vegas_ml_away: int
+
+    spread_diff: float
+    total_diff: float
+
+    value_bets: List[ValueBetResponse]
+
+    # Team statistics comparison
+    stat_comparison: Optional[TeamStatComparisonResponse] = None
+    major_stat_diffs: List[StatDifferenceResponse] = []
+
+
+class TeamRatingResponse(BaseModel):
+    team_name: str
+    rank: int
+    conference: str
+    wins: int
+    losses: int
+    adj_em: float
+    adj_oe: float
+    adj_de: float
+    adj_tempo: float
+    sos: float
+
+
+class HealthResponse(BaseModel):
+    status: str
+    timestamp: datetime
+    version: str
+
+
+# ==================== APP SETUP ====================
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Initialize database and services on startup."""
+    init_db()
+    logger.info("[Startup] Database initialized")
+    yield
+
+
+app = FastAPI(
+    title="CBB Betting API",
+    description="College Basketball betting analysis and value bet detection",
+    version="1.0.0",
+    lifespan=lifespan
+)
+
+# CORS middleware - restricted to configured origins
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=ALLOWED_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "PUT", "DELETE"],
+    allow_headers=["*"],
+)
+
+# Service instances
+game_service = GameService()
+ml_predictor = MLPredictor()
+bet_history_service = BetHistoryService()
+
+
+# ==================== ENDPOINTS ====================
+
+@app.get("/health", response_model=HealthResponse)
+async def health_check():
+    """Health check endpoint."""
+    return HealthResponse(
+        status="healthy",
+        timestamp=datetime.utcnow(),
+        version="1.0.0"
+    )
+
+
+@app.get("/api/games/today", response_model=List[GameAnalysisResponse])
+async def get_todays_games():
+    """Get analysis for all of today's games."""
+    try:
+        analyses = await game_service.get_todays_analysis()
+        return [_analysis_to_response(a) for a in analyses]
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/games/{game_date}", response_model=List[GameAnalysisResponse])
+async def get_games_by_date(game_date: str):
+    """Get analysis for games on a specific date (YYYY-MM-DD)."""
+    try:
+        # Validate date format
+        datetime.strptime(game_date, "%Y-%m-%d")
+
+        # Use the service to get analyses for the specific date
+        analyses = await game_service.get_analysis_for_date(game_date)
+        return [_analysis_to_response(a) for a in analyses]
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/value-bets", response_model=List[dict])
+async def get_value_bets(
+    min_edge: float = Query(0.03, ge=0.0, le=1.0, description="Minimum edge to include (0.0 to 1.0)"),
+    bet_type: Optional[str] = Query(None, description="Filter by bet type: spread, total, moneyline")
+):
+    """Get all value bets for today's games, sorted by confidence (high first)."""
+    try:
+        value_games = await game_service.get_value_bets_today(min_edge)
+
+        results = []
+        for analysis, value_bets in value_games:
+            # Build major stat diffs list for this game
+            major_stat_diffs = []
+            if analysis.major_stat_diffs:
+                for diff in analysis.major_stat_diffs:
+                    major_stat_diffs.append({
+                        "stat_name": diff.stat_name,
+                        "display_name": diff.display_name,
+                        "home_value": diff.home_value,
+                        "away_value": diff.away_value,
+                        "difference": diff.difference,
+                        "advantage": diff.advantage,
+                        "significance": diff.significance
+                    })
+
+            # Build stat comparison summary
+            stat_summary = None
+            if analysis.stat_comparison:
+                stat_summary = {
+                    "efficiency_edge": analysis.stat_comparison.efficiency_edge,
+                    "shooting_edge": analysis.stat_comparison.shooting_edge,
+                    "rebounding_edge": analysis.stat_comparison.rebounding_edge,
+                    "turnover_edge": analysis.stat_comparison.turnover_edge,
+                    "tempo_mismatch": analysis.stat_comparison.tempo_mismatch
+                }
+
+            for vb in value_bets:
+                if bet_type is None or vb.bet_type.value == bet_type:
+                    results.append({
+                        "home_team": analysis.home_team,
+                        "away_team": analysis.away_team,
+                        "home_rank": analysis.home_rank,
+                        "away_rank": analysis.away_rank,
+                        "game_time": analysis.game_time.isoformat(),
+                        "kenpom_spread": analysis.kenpom_spread,
+                        "kenpom_total": analysis.kenpom_total,
+                        "vegas_spread": analysis.vegas_spread,
+                        "vegas_total": analysis.vegas_total,
+                        "spread_diff": analysis.spread_diff,
+                        "total_diff": analysis.total_diff,
+                        "bet": {
+                            "type": vb.bet_type.value,
+                            "side": vb.side,
+                            "odds": vb.market_odds,
+                            "line": vb.market_line,
+                            "book": vb.recommended_book,
+                            "edge": vb.edge,
+                            "ev": vb.ev,
+                            "kelly": vb.kelly_fraction,
+                            "confidence": vb.confidence,
+                            "confidence_score": vb.confidence_score,
+                            "confidence_factors": vb.confidence_factors
+                        },
+                        "major_stat_diffs": major_stat_diffs,
+                        "stat_summary": stat_summary
+                    })
+
+        # Sort by confidence: high first, then medium, then low
+        confidence_order = {"high": 0, "medium": 1, "low": 2}
+        results.sort(key=lambda x: (
+            confidence_order.get(x["bet"]["confidence"], 3),  # Primary: confidence tier
+            -x["bet"]["confidence_score"]  # Secondary: score within tier (higher first)
+        ))
+
+        return results
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/matchup")
+async def analyze_matchup(
+    home: str = Query(..., description="Home team name"),
+    away: str = Query(..., description="Away team name"),
+    game_date: Optional[str] = Query(None, description="Game date (YYYY-MM-DD)")
+):
+    """Analyze a specific matchup."""
+    try:
+        analysis = await game_service.get_game_analysis(home, away, game_date)
+        if not analysis:
+            raise HTTPException(status_code=404, detail="Game not found")
+        return _analysis_to_response(analysis)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/rankings", response_model=List[TeamRatingResponse])
+async def get_rankings(
+    year: int = Query(2025, description="Season year"),
+    conference: Optional[str] = Query(None, description="Conference short name"),
+    limit: int = Query(50, description="Number of teams to return")
+):
+    """Get KenPom rankings."""
+    try:
+        kenpom = KenPomClient()
+        ratings = await kenpom.get_ratings(year=year, conference=conference)
+        
+        # Sort by rank
+        ratings.sort(key=lambda x: x.get("RankAdjEM", 999))
+        ratings = ratings[:limit]
+        
+        return [
+            TeamRatingResponse(
+                team_name=r.get("TeamName", ""),
+                rank=r.get("RankAdjEM", 0),
+                conference=r.get("ConfShort", ""),
+                wins=r.get("Wins", 0),
+                losses=r.get("Losses", 0),
+                adj_em=r.get("AdjEM", 0),
+                adj_oe=r.get("AdjOE", 0),
+                adj_de=r.get("AdjDE", 0),
+                adj_tempo=r.get("AdjTempo", 0),
+                sos=r.get("SOS", 0)
+            )
+            for r in ratings
+        ]
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/spreads")
+async def get_spread_discrepancies(
+    min_diff: float = Query(2.0, description="Minimum spread difference")
+):
+    """Get games where KenPom spread differs significantly from Vegas."""
+    try:
+        analyses = await game_service.get_todays_analysis()
+        
+        spread_games = [
+            {
+                "home_team": a.home_team,
+                "away_team": a.away_team,
+                "game_time": a.game_time.isoformat(),
+                "kenpom_spread": a.kenpom_spread,
+                "vegas_spread": a.vegas_spread,
+                "difference": a.spread_diff,
+                "lean": f"{a.away_team}" if a.spread_diff > 0 else f"{a.home_team}"
+            }
+            for a in analyses
+            if a.vegas_spread != 0 and abs(a.spread_diff) >= min_diff
+        ]
+        
+        spread_games.sort(key=lambda x: abs(x["difference"]), reverse=True)
+        return spread_games
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/totals")
+async def get_total_discrepancies(
+    min_diff: float = Query(3.0, description="Minimum total difference")
+):
+    """Get games where KenPom total differs significantly from Vegas."""
+    try:
+        analyses = await game_service.get_todays_analysis()
+        
+        total_games = [
+            {
+                "home_team": a.home_team,
+                "away_team": a.away_team,
+                "game_time": a.game_time.isoformat(),
+                "kenpom_total": a.kenpom_total,
+                "vegas_total": a.vegas_total,
+                "difference": a.total_diff,
+                "lean": "over" if a.total_diff > 0 else "under"
+            }
+            for a in analyses
+            if a.vegas_total != 0 and abs(a.total_diff) >= min_diff
+        ]
+        
+        total_games.sort(key=lambda x: abs(x["difference"]), reverse=True)
+        return total_games
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/odds/usage")
+async def get_odds_api_usage():
+    """Get The Odds API usage statistics."""
+    try:
+        odds = OddsAPIClient()
+        # Make a lightweight request to get usage headers
+        await odds.get_sports()
+        return odds.get_api_usage()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ==================== BET HISTORY ENDPOINTS ====================
+
+@app.get("/api/bet-history")
+async def get_bet_history(
+    days: int = Query(30, description="Number of days of history to return")
+):
+    """Get bet history with results for the last N days."""
+    try:
+        history = bet_history_service.get_history_for_display(days)
+        return history
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/bet-history/stats")
+async def get_betting_stats():
+    """Get overall betting statistics and performance."""
+    try:
+        stats = bet_history_service.get_overall_stats()
+        return {
+            "total_bets": stats.total_bets,
+            "total_wins": stats.total_wins,
+            "total_losses": stats.total_losses,
+            "total_pushes": stats.total_pushes,
+            "total_pending": stats.total_pending,
+            "win_rate": stats.win_rate,
+            "high_conf": {
+                "record": stats.high_conf_record,
+                "win_rate": stats.high_conf_win_rate
+            },
+            "medium_conf": {
+                "record": stats.medium_conf_record,
+                "win_rate": stats.medium_conf_win_rate
+            },
+            "low_conf": {
+                "record": stats.low_conf_record,
+                "win_rate": stats.low_conf_win_rate
+            },
+            "by_type": {
+                "spread": {
+                    "record": stats.spread_record,
+                    "win_rate": stats.spread_win_rate
+                },
+                "total": {
+                    "record": stats.total_record,
+                    "win_rate": stats.total_win_rate
+                },
+                "moneyline": {
+                    "record": stats.ml_record,
+                    "win_rate": stats.ml_win_rate
+                }
+            },
+            "avg_edge": stats.avg_edge,
+            "avg_ev": stats.avg_ev,
+            "streaks": {
+                "current": stats.current_streak,
+                "type": stats.streak_type,
+                "longest_win": stats.longest_win_streak,
+                "longest_loss": stats.longest_loss_streak
+            },
+            "recent": {
+                "last_7_days": {
+                    "record": stats.last_7_days_record,
+                    "win_rate": stats.last_7_days_win_rate
+                },
+                "last_30_days": {
+                    "record": stats.last_30_days_record,
+                    "win_rate": stats.last_30_days_win_rate
+                }
+            }
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/bet-history/daily/{date}")
+async def get_daily_summary(date: str):
+    """Get betting summary for a specific date (YYYY-MM-DD)."""
+    try:
+        # Validate date format
+        datetime.strptime(date, "%Y-%m-%d")
+        summary = bet_history_service.get_daily_summary(date)
+        return {
+            "date": summary.date,
+            "total_bets": summary.total_bets,
+            "wins": summary.wins,
+            "losses": summary.losses,
+            "pushes": summary.pushes,
+            "pending": summary.pending,
+            "win_rate": summary.win_rate,
+            "by_confidence": {
+                "high": {
+                    "bets": summary.high_conf_bets,
+                    "wins": summary.high_conf_wins
+                },
+                "medium": {
+                    "bets": summary.medium_conf_bets,
+                    "wins": summary.medium_conf_wins
+                },
+                "low": {
+                    "bets": summary.low_conf_bets,
+                    "wins": summary.low_conf_wins
+                }
+            },
+            "by_type": {
+                "spread": {
+                    "bets": summary.spread_bets,
+                    "wins": summary.spread_wins
+                },
+                "total": {
+                    "bets": summary.total_bets_count,
+                    "wins": summary.total_wins
+                },
+                "moneyline": {
+                    "bets": summary.ml_bets,
+                    "wins": summary.ml_wins
+                }
+            },
+            "avg_edge": summary.avg_edge,
+            "avg_ev": summary.avg_ev
+        }
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/bet-history/store")
+async def store_todays_bets(
+    min_edge: float = Query(0.03, description="Minimum edge to store")
+):
+    """Store today's medium and high confidence value bets for tracking."""
+    try:
+        # Get today's value bets
+        value_games = await game_service.get_value_bets_today(min_edge)
+
+        # Format for storage - only medium and high confidence bets
+        value_bets_data = []
+        skipped_low = 0
+        for analysis, value_bets in value_games:
+            for vb in value_bets:
+                # Only track medium and high confidence bets
+                if vb.confidence in ("medium", "high"):
+                    value_bets_data.append({
+                        "home_team": analysis.home_team,
+                        "away_team": analysis.away_team,
+                        "game_time": analysis.game_time.isoformat(),
+                        "home_rank": analysis.home_rank,
+                        "away_rank": analysis.away_rank,
+                        "kenpom_spread": analysis.kenpom_spread,
+                        "kenpom_total": analysis.kenpom_total,
+                        "vegas_spread": analysis.vegas_spread,
+                        "vegas_total": analysis.vegas_total,
+                        "bet": {
+                            "type": vb.bet_type.value,
+                            "side": vb.side,
+                            "line": vb.market_line,
+                            "odds": vb.market_odds,
+                            "book": vb.recommended_book,
+                            "model_prob": vb.model_prob,
+                            "market_implied_prob": vb.market_implied_prob,
+                            "edge": vb.edge,
+                            "ev": vb.ev,
+                            "kelly": vb.kelly_fraction,
+                            "confidence": vb.confidence,
+                            "confidence_score": vb.confidence_score
+                        }
+                    })
+                else:
+                    skipped_low += 1
+
+        # Store bets
+        count = bet_history_service.store_all_value_bets(value_bets_data)
+
+        return {
+            "stored": count,
+            "total_trackable": len(value_bets_data),
+            "skipped_low_confidence": skipped_low,
+            "message": f"Stored {count} new medium/high confidence bets (skipped {skipped_low} low confidence)"
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/bet-history/update-results")
+async def update_bet_results(scores: dict):
+    """
+    Update bet results with final scores.
+
+    Body should be: {"Team A vs Team B": {"home": 75, "away": 68}, ...}
+    """
+    try:
+        updated = bet_history_service.update_results(scores)
+        return {
+            "updated": updated,
+            "message": f"Updated {updated} bet results"
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/bet-history/pending")
+async def get_pending_bets():
+    """Get all bets awaiting results."""
+    try:
+        pending = bet_history_service.get_pending_bets()
+        return [
+            {
+                "id": bet.id,
+                "date": bet.date,
+                "game_time": bet.game_time,
+                "home_team": bet.home_team,
+                "away_team": bet.away_team,
+                "bet_type": bet.bet_type,
+                "side": bet.side,
+                "line": bet.line,
+                "odds": bet.odds,
+                "confidence": bet.confidence
+            }
+            for bet in pending
+        ]
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/bet-history/fetch-results")
+async def fetch_and_update_results():
+    """
+    Fetch completed game scores and update bet results automatically.
+    This endpoint checks for games from yesterday that have completed.
+    """
+    try:
+        from datetime import timedelta
+
+        # Get yesterday's date
+        yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+
+        # Get pending bets
+        pending = bet_history_service.get_pending_bets()
+
+        if not pending:
+            return {"message": "No pending bets to update", "updated": 0}
+
+        # Try to get scores from Odds API (completed events)
+        odds_client = OddsAPIClient()
+
+        # Get scores for basketball_ncaab
+        try:
+            scores_data = await odds_client.get_scores("basketball_ncaab", days_from=2)
+        except Exception as e:
+            return {"error": f"Could not fetch scores: {str(e)}", "updated": 0}
+
+        # Build scores dict
+        scores = {}
+        for game in scores_data:
+            if game.get("completed"):
+                home_team = game.get("home_team")
+                away_team = game.get("away_team")
+
+                home_score = None
+                away_score = None
+
+                for score in game.get("scores", []):
+                    if score.get("name") == home_team:
+                        home_score = int(score.get("score", 0))
+                    elif score.get("name") == away_team:
+                        away_score = int(score.get("score", 0))
+
+                if home_score is not None and away_score is not None:
+                    key = f"{home_team} vs {away_team}"
+                    scores[key] = {"home": home_score, "away": away_score}
+
+        # Update results
+        updated = bet_history_service.update_results(scores)
+
+        return {
+            "games_found": len(scores),
+            "bets_updated": updated,
+            "message": f"Found {len(scores)} completed games, updated {updated} bets"
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ==================== HELPER FUNCTIONS ====================
+
+def _stat_comparison_to_response(stat_comparison) -> Optional[TeamStatComparisonResponse]:
+    """Convert TeamStatComparison to response model."""
+    if not stat_comparison:
+        return None
+
+    def stats_to_response(stats) -> TeamStatsResponse:
+        return TeamStatsResponse(
+            team_name=stats.team_name,
+            rank=stats.rank,
+            adj_em=stats.adj_em,
+            adj_oe=stats.adj_oe,
+            adj_de=stats.adj_de,
+            adj_tempo=stats.adj_tempo,
+            efg_pct=stats.efg_pct,
+            to_pct=stats.to_pct,
+            or_pct=stats.or_pct,
+            ft_rate=stats.ft_rate,
+            d_efg_pct=stats.d_efg_pct,
+            d_to_pct=stats.d_to_pct,
+            d_or_pct=stats.d_or_pct,
+            d_ft_rate=stats.d_ft_rate,
+            sos=stats.sos,
+            luck=stats.luck
+        )
+
+    def diff_to_response(diff) -> StatDifferenceResponse:
+        return StatDifferenceResponse(
+            stat_name=diff.stat_name,
+            display_name=diff.display_name,
+            home_value=diff.home_value,
+            away_value=diff.away_value,
+            difference=diff.difference,
+            advantage=diff.advantage,
+            significance=diff.significance,
+            higher_is_better=diff.higher_is_better
+        )
+
+    return TeamStatComparisonResponse(
+        home_stats=stats_to_response(stat_comparison.home_stats),
+        away_stats=stats_to_response(stat_comparison.away_stats),
+        stat_differences=[diff_to_response(d) for d in stat_comparison.stat_differences],
+        major_differences=[diff_to_response(d) for d in stat_comparison.major_differences],
+        efficiency_edge=stat_comparison.efficiency_edge,
+        tempo_mismatch=stat_comparison.tempo_mismatch,
+        shooting_edge=stat_comparison.shooting_edge,
+        rebounding_edge=stat_comparison.rebounding_edge,
+        turnover_edge=stat_comparison.turnover_edge
+    )
+
+
+def _analysis_to_response(analysis) -> GameAnalysisResponse:
+    """Convert GameAnalysis to response model."""
+    stat_comparison_response = _stat_comparison_to_response(analysis.stat_comparison)
+
+    # Build major stat diffs from the analysis
+    major_diffs = []
+    if analysis.major_stat_diffs:
+        for diff in analysis.major_stat_diffs:
+            major_diffs.append(StatDifferenceResponse(
+                stat_name=diff.stat_name,
+                display_name=diff.display_name,
+                home_value=diff.home_value,
+                away_value=diff.away_value,
+                difference=diff.difference,
+                advantage=diff.advantage,
+                significance=diff.significance,
+                higher_is_better=diff.higher_is_better
+            ))
+
+    return GameAnalysisResponse(
+        home_team=analysis.home_team,
+        away_team=analysis.away_team,
+        game_time=analysis.game_time,
+        home_rank=analysis.home_rank,
+        away_rank=analysis.away_rank,
+        kenpom_home_score=analysis.kenpom_home_score,
+        kenpom_away_score=analysis.kenpom_away_score,
+        kenpom_spread=analysis.kenpom_spread,
+        kenpom_total=analysis.kenpom_total,
+        kenpom_home_win_prob=analysis.kenpom_home_win_prob,
+        kenpom_tempo=analysis.kenpom_tempo,
+        vegas_spread=analysis.vegas_spread,
+        vegas_total=analysis.vegas_total,
+        vegas_ml_home=analysis.vegas_ml_home,
+        vegas_ml_away=analysis.vegas_ml_away,
+        spread_diff=analysis.spread_diff,
+        total_diff=analysis.total_diff,
+        value_bets=[
+            ValueBetResponse(
+                home_team=analysis.home_team,
+                away_team=analysis.away_team,
+                bet_type=vb.bet_type.value,
+                side=vb.side,
+                model_prob=vb.model_prob,
+                market_odds=vb.market_odds,
+                market_line=vb.market_line,
+                model_line=vb.model_line,
+                market_implied_prob=vb.market_implied_prob,
+                edge=vb.edge,
+                ev=vb.ev,
+                kelly_fraction=vb.kelly_fraction,
+                recommended_book=vb.recommended_book,
+                confidence=vb.confidence
+            )
+            for vb in analysis.value_bets
+        ],
+        stat_comparison=stat_comparison_response,
+        major_stat_diffs=major_diffs
+    )
+
+
+# Vercel serverless handler
+try:
+    from mangum import Mangum
+    handler = Mangum(app, lifespan="off")
+except ImportError:
+    handler = None
+
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)

@@ -1,0 +1,303 @@
+"""
+Database Models
+
+SQLAlchemy models for storing games, predictions, odds, and tracking results.
+"""
+
+from datetime import datetime
+from typing import Optional
+from sqlalchemy import (
+    Column, Integer, String, Float, Boolean, DateTime, 
+    ForeignKey, Text, JSON, UniqueConstraint, Index
+)
+from sqlalchemy.orm import relationship, declarative_base
+
+Base = declarative_base()
+
+
+class Team(Base):
+    """College basketball team."""
+    __tablename__ = "teams"
+    
+    id = Column(Integer, primary_key=True)
+    kenpom_id = Column(Integer, unique=True, nullable=True)
+    name = Column(String(255), nullable=False)
+    conference = Column(String(50))
+    coach = Column(String(255))
+    arena = Column(String(255))
+    
+    # Relationships
+    home_games = relationship("Game", back_populates="home_team", foreign_keys="Game.home_team_id")
+    away_games = relationship("Game", back_populates="away_team", foreign_keys="Game.away_team_id")
+    ratings = relationship("TeamRating", back_populates="team")
+    
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class TeamRating(Base):
+    """Historical KenPom ratings for a team."""
+    __tablename__ = "team_ratings"
+    
+    id = Column(Integer, primary_key=True)
+    team_id = Column(Integer, ForeignKey("teams.id"), nullable=False)
+    date = Column(DateTime, nullable=False)
+    season = Column(Integer, nullable=False)
+    
+    # KenPom metrics
+    adj_em = Column(Float)          # Adjusted Efficiency Margin
+    rank_adj_em = Column(Integer)
+    adj_oe = Column(Float)          # Adjusted Offensive Efficiency
+    rank_adj_oe = Column(Integer)
+    adj_de = Column(Float)          # Adjusted Defensive Efficiency
+    rank_adj_de = Column(Integer)
+    adj_tempo = Column(Float)       # Adjusted Tempo
+    rank_adj_tempo = Column(Integer)
+    
+    # Additional metrics
+    luck = Column(Float)
+    sos = Column(Float)             # Strength of Schedule
+    pythag = Column(Float)          # Pythagorean expectation
+    
+    # Four Factors (Offense)
+    efg_pct = Column(Float)         # Effective FG%
+    to_pct = Column(Float)          # Turnover %
+    or_pct = Column(Float)          # Offensive Rebound %
+    ft_rate = Column(Float)         # Free Throw Rate
+    
+    # Four Factors (Defense)
+    d_efg_pct = Column(Float)
+    d_to_pct = Column(Float)
+    d_or_pct = Column(Float)
+    d_ft_rate = Column(Float)
+    
+    team = relationship("Team", back_populates="ratings")
+    
+    __table_args__ = (
+        UniqueConstraint("team_id", "date", name="unique_team_date_rating"),
+        Index("idx_team_rating_date", "team_id", "date"),
+    )
+
+
+class Game(Base):
+    """A college basketball game."""
+    __tablename__ = "games"
+    
+    id = Column(Integer, primary_key=True)
+    external_id = Column(String(100), unique=True)  # Odds API event ID
+    kenpom_game_id = Column(Integer, nullable=True)
+    
+    home_team_id = Column(Integer, ForeignKey("teams.id"), nullable=False)
+    away_team_id = Column(Integer, ForeignKey("teams.id"), nullable=False)
+    
+    scheduled_time = Column(DateTime, nullable=False)
+    season = Column(Integer, nullable=False)
+    
+    # Actual results (filled in after game)
+    home_score = Column(Integer)
+    away_score = Column(Integer)
+    is_completed = Column(Boolean, default=False)
+    
+    # Relationships
+    home_team = relationship("Team", back_populates="home_games", foreign_keys=[home_team_id])
+    away_team = relationship("Team", back_populates="away_games", foreign_keys=[away_team_id])
+    predictions = relationship("Prediction", back_populates="game")
+    odds_snapshots = relationship("OddsSnapshot", back_populates="game")
+    
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    
+    __table_args__ = (
+        Index("idx_game_scheduled", "scheduled_time"),
+        Index("idx_game_season", "season"),
+    )
+
+
+class Prediction(Base):
+    """A prediction for a game (KenPom or ML model)."""
+    __tablename__ = "predictions"
+    
+    id = Column(Integer, primary_key=True)
+    game_id = Column(Integer, ForeignKey("games.id"), nullable=False)
+    
+    source = Column(String(50), nullable=False)  # 'kenpom', 'ml_v1', etc.
+    created_at = Column(DateTime, default=datetime.utcnow)
+    
+    # Score predictions
+    home_score_pred = Column(Float)
+    away_score_pred = Column(Float)
+    
+    # Win probability
+    home_win_prob = Column(Float)
+    
+    # Spread prediction (positive = home favored)
+    spread_pred = Column(Float)
+    
+    # Total prediction
+    total_pred = Column(Float)
+    
+    # Tempo prediction
+    tempo_pred = Column(Float)
+    
+    # Model confidence (for ML predictions)
+    confidence = Column(Float)
+    
+    # Feature data used for prediction (for ML model debugging)
+    features = Column(JSON)
+    
+    game = relationship("Game", back_populates="predictions")
+    value_bets = relationship("ValueBet", back_populates="prediction")
+    
+    __table_args__ = (
+        UniqueConstraint("game_id", "source", "created_at", name="unique_game_source_time"),
+    )
+
+
+class OddsSnapshot(Base):
+    """Snapshot of betting odds at a point in time."""
+    __tablename__ = "odds_snapshots"
+    
+    id = Column(Integer, primary_key=True)
+    game_id = Column(Integer, ForeignKey("games.id"), nullable=False)
+    captured_at = Column(DateTime, default=datetime.utcnow)
+    
+    # Consensus/average lines
+    spread_home = Column(Float)      # e.g., -6.5
+    spread_home_odds = Column(Integer)  # e.g., -110
+    spread_away_odds = Column(Integer)
+    
+    total = Column(Float)            # e.g., 145.5
+    over_odds = Column(Integer)
+    under_odds = Column(Integer)
+    
+    moneyline_home = Column(Integer)  # e.g., -250
+    moneyline_away = Column(Integer)  # e.g., +200
+    
+    # Best available odds across books
+    best_spread_home_odds = Column(Integer)
+    best_spread_home_book = Column(String(50))
+    best_spread_away_odds = Column(Integer)
+    best_spread_away_book = Column(String(50))
+    
+    best_over_odds = Column(Integer)
+    best_over_book = Column(String(50))
+    best_under_odds = Column(Integer)
+    best_under_book = Column(String(50))
+    
+    best_ml_home_odds = Column(Integer)
+    best_ml_home_book = Column(String(50))
+    best_ml_away_odds = Column(Integer)
+    best_ml_away_book = Column(String(50))
+    
+    # Raw data from API
+    raw_data = Column(JSON)
+    
+    game = relationship("Game", back_populates="odds_snapshots")
+    
+    __table_args__ = (
+        Index("idx_odds_game_time", "game_id", "captured_at"),
+    )
+
+
+class ValueBet(Base):
+    """Identified value betting opportunity."""
+    __tablename__ = "value_bets"
+    
+    id = Column(Integer, primary_key=True)
+    prediction_id = Column(Integer, ForeignKey("predictions.id"), nullable=False)
+    game_id = Column(Integer, ForeignKey("games.id"), nullable=False)
+    
+    bet_type = Column(String(20), nullable=False)  # 'spread', 'total', 'moneyline'
+    side = Column(String(50), nullable=False)       # team name, 'over', 'under'
+    
+    # Our prediction
+    model_prob = Column(Float, nullable=False)      # Our predicted probability
+    model_line = Column(Float)                       # Our predicted line
+    
+    # Market odds
+    market_odds = Column(Integer, nullable=False)
+    market_line = Column(Float)
+    market_implied_prob = Column(Float, nullable=False)
+    
+    # Value calculation
+    edge = Column(Float, nullable=False)            # model_prob - market_implied_prob
+    kelly_fraction = Column(Float)                   # Kelly criterion bet size
+    
+    # Best book to place bet
+    recommended_book = Column(String(50))
+    
+    # Result tracking
+    is_winner = Column(Boolean)
+    actual_result = Column(Float)  # Actual margin or total
+    
+    created_at = Column(DateTime, default=datetime.utcnow)
+    
+    prediction = relationship("Prediction", back_populates="value_bets")
+    game = relationship("Game")
+    
+    __table_args__ = (
+        Index("idx_value_bet_type", "bet_type"),
+        Index("idx_value_bet_edge", "edge"),
+    )
+
+
+class BettingResult(Base):
+    """Track actual betting performance."""
+    __tablename__ = "betting_results"
+    
+    id = Column(Integer, primary_key=True)
+    value_bet_id = Column(Integer, ForeignKey("value_bets.id"), nullable=False)
+    
+    # Bet details
+    stake = Column(Float)           # Amount wagered (in units)
+    odds_taken = Column(Integer)    # Actual odds when bet placed
+    
+    # Result
+    payout = Column(Float)          # Amount won/lost (in units)
+    is_win = Column(Boolean)
+    
+    # Running totals (updated after each bet)
+    cumulative_profit = Column(Float)
+    cumulative_roi = Column(Float)
+    
+    settled_at = Column(DateTime)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    
+    __table_args__ = (
+        Index("idx_betting_result_settled", "settled_at"),
+    )
+
+
+class MLModelVersion(Base):
+    """Track ML model versions and performance."""
+    __tablename__ = "ml_model_versions"
+    
+    id = Column(Integer, primary_key=True)
+    version = Column(String(50), unique=True, nullable=False)
+    
+    # Model details
+    model_type = Column(String(100))  # e.g., 'XGBoost', 'RandomForest'
+    features_used = Column(JSON)
+    hyperparameters = Column(JSON)
+    
+    # Training metrics
+    train_accuracy = Column(Float)
+    val_accuracy = Column(Float)
+    train_log_loss = Column(Float)
+    val_log_loss = Column(Float)
+    
+    # Calibration metrics
+    brier_score = Column(Float)
+    calibration_error = Column(Float)
+    
+    # Live performance
+    live_accuracy = Column(Float)
+    live_roi = Column(Float)
+    total_predictions = Column(Integer, default=0)
+    
+    is_active = Column(Boolean, default=False)
+    trained_at = Column(DateTime)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    
+    # Path to saved model file
+    model_path = Column(String(500))
