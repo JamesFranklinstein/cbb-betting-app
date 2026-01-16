@@ -3,7 +3,7 @@ import axios from 'axios';
 import { format } from 'date-fns';
 
 // API base URL
-const API_BASE = process.env.REACT_APP_API_URL || 'http://localhost:8000';
+const API_BASE = process.env.REACT_APP_API_URL || 'https://cbb-backend-production-9663.up.railway.app';
 
 // Error Boundary Component to catch React errors gracefully
 class ErrorBoundary extends Component {
