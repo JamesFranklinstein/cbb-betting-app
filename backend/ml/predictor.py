@@ -9,7 +9,7 @@ Uses KenPom metrics, height data, and historical data to improve predictions.
 import os
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List, Dict, Any, Optional, Tuple
 from dataclasses import dataclass
 
@@ -308,7 +308,7 @@ class MLPredictor:
         self.pytorch_trainer.calibrate_temperature(val_df)
 
         # Save model
-        version = f"v{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}_pytorch"
+        version = f"v{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}_pytorch"
         self.pytorch_model_path = self.pytorch_trainer.save_model(version)
 
         # Update state

@@ -8,7 +8,7 @@ Builds training data for model retraining and tracks prediction accuracy.
 import logging
 import hashlib
 import json
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import List, Dict, Any, Optional
 from dataclasses import asdict
 
@@ -57,7 +57,7 @@ class FeedbackCollector:
         # Import models here to avoid circular imports
         from models.database import Game, Prediction, Team, TeamRating
 
-        cutoff = datetime.utcnow() - timedelta(days=days_back)
+        cutoff = datetime.now(timezone.utc) - timedelta(days=days_back)
 
         # Build query for completed games
         query = self.session.query(Game).filter(
@@ -437,7 +437,7 @@ class FeedbackCollector:
         from models.database import TrainingData
         import numpy as np
 
-        cutoff = datetime.utcnow() - timedelta(days=days_back)
+        cutoff = datetime.now(timezone.utc) - timedelta(days=days_back)
 
         query = self.session.query(TrainingData).filter(
             TrainingData.game_date >= cutoff

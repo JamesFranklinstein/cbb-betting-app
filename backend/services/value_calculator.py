@@ -11,7 +11,7 @@ from enum import Enum
 import math
 import json
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 
 
 class BetType(Enum):

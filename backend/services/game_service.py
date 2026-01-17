@@ -8,7 +8,7 @@ game analysis and value bet identification.
 import asyncio
 import logging
 import threading
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from typing import List, Dict, Any, Optional, Tuple
 from dataclasses import dataclass, field
 
@@ -633,7 +633,7 @@ class GameService:
             game_time = datetime.fromisoformat(odds_game["commence_time"].replace("Z", "+00:00"))
         except (KeyError, ValueError, TypeError) as e:
             logger.warning(f"Could not parse game time: {e}, using current time")
-            game_time = datetime.now()
+            game_time = datetime.now(timezone.utc)
 
         # Safely calculate spread/total diffs (handle None values)
         vegas_spread = market_odds.spread if market_odds.spread is not None else 0.0
@@ -675,7 +675,7 @@ class GameService:
 
         # Parse the game date
         game_date = kp_game.get("DateOfGame", date.today().isoformat())
-        game_time = datetime.fromisoformat(game_date) if "T" in game_date else datetime.now()
+        game_time = datetime.fromisoformat(game_date) if "T" in game_date else datetime.now(timezone.utc)
 
         # Get team stats and create comparison
         home_stats = self._get_team_stats(kp_game["Home"])

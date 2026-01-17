@@ -6,7 +6,7 @@ Uses APScheduler for background job execution.
 """
 
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional, Callable
 
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -194,7 +194,7 @@ class RetrainingScheduler:
             trainer.calibrate_temperature(val_df)
 
             # Save and register version
-            version_str = f"v{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}_pytorch"
+            version_str = f"v{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}_pytorch"
             model_path = trainer.save_model(version_str)
 
             version_manager = ModelVersionManager(self.model_dir, session)

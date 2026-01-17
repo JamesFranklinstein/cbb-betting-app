@@ -8,7 +8,7 @@ with support for the feedback loop from historical predictions and results.
 import os
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, Any, Optional, Tuple, List
 
 import numpy as np
@@ -529,7 +529,7 @@ class CBBModelTrainer:
                 'height_feature_indices': self.model.height_feature_indices,
             },
             'version': version,
-            'saved_at': datetime.utcnow().isoformat(),
+            'saved_at': datetime.now(timezone.utc).isoformat(),
             'training_history': self.training_history,
         }, path)
 

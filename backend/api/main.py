@@ -7,7 +7,7 @@ REST API for the CBB Betting application.
 import asyncio
 import logging
 import os
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import List, Optional
 from contextlib import asynccontextmanager
 
@@ -189,7 +189,7 @@ async def health_check():
     """Health check endpoint."""
     return HealthResponse(
         status="healthy",
-        timestamp=datetime.utcnow(),
+        timestamp=datetime.now(timezone.utc),
         version="1.0.0"
     )
 
@@ -852,7 +852,7 @@ async def trigger_ml_retraining(
             trainer.calibrate_temperature(val_df)
 
             # Save and register version
-            version_str = f"v{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}_pytorch"
+            version_str = f"v{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}_pytorch"
             model_path = trainer.save_model(version_str)
 
             version_manager = ModelVersionManager("./models", session)
@@ -954,13 +954,13 @@ async def get_ml_feedback_stats():
             total_samples = session.query(TrainingData).count()
 
             # Get samples from last 7 days
-            week_ago = datetime.utcnow() - timedelta(days=7)
+            week_ago = datetime.now(timezone.utc) - timedelta(days=7)
             samples_7d = session.query(TrainingData).filter(
                 TrainingData.created_at >= week_ago
             ).count()
 
             # Get samples from last 30 days
-            month_ago = datetime.utcnow() - timedelta(days=30)
+            month_ago = datetime.now(timezone.utc) - timedelta(days=30)
             samples_30d = session.query(TrainingData).filter(
                 TrainingData.created_at >= month_ago
             ).count()

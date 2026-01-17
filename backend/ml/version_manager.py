@@ -7,7 +7,7 @@ Tracks performance metrics for each model version.
 
 import os
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, Any, Optional, List
 
 from sqlalchemy.orm import Session
@@ -62,7 +62,7 @@ class ModelVersionManager:
         from models.database import MLModelVersion
 
         # Generate version string
-        timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
         version = f"v{timestamp}_{model_type.lower()}"
 
         model_version = MLModelVersion(
@@ -78,7 +78,7 @@ class ModelVersionManager:
             spread_mae=training_metrics.get('spread_mae'),
             total_mae=training_metrics.get('total_mae'),
             is_active=False,
-            trained_at=datetime.utcnow(),
+            trained_at=datetime.now(timezone.utc),
             model_path=model_path,
         )
 
