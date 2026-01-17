@@ -46,7 +46,8 @@
       "Bash(git merge:*)",
       "Bash(git push:*)",
       "Bash(gh pr create:*)",
-      "Bash(git fetch:*)"
+      "Bash(git fetch:*)",
+      "Bash(RAILWAY_INSTALL_DIR=~/.local/bin sh:*)"
     ]
   }
 }
