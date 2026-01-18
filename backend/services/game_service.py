@@ -8,9 +8,21 @@ game analysis and value bet identification.
 import asyncio
 import logging
 import threading
-from datetime import date, datetime
+from datetime import date, datetime, timezone, timedelta
 from typing import List, Dict, Any, Optional, Tuple
 from dataclasses import dataclass, field
+
+# US Eastern timezone offset (UTC-5, or UTC-4 during DST)
+# College basketball games are scheduled in US timezones, so we use Eastern
+# to determine "today" for game fetching purposes
+def get_us_eastern_date() -> date:
+    """Get the current date in US Eastern timezone."""
+    # US Eastern is UTC-5 (or UTC-4 during DST)
+    # For simplicity, we'll use UTC-5 which is safe for late night UTC times
+    utc_now = datetime.now(timezone.utc)
+    eastern_offset = timedelta(hours=-5)
+    eastern_now = utc_now + eastern_offset
+    return eastern_now.date()
 
 from clients import KenPomClient, OddsAPIClient, Market
 from .value_calculator import (
@@ -273,10 +285,14 @@ class GameService:
         """
         Get complete analysis for all of today's games.
 
+        Uses US Eastern timezone to determine "today" since college basketball
+        games are scheduled in US timezones. This prevents timezone issues when
+        the server runs in UTC (e.g., on Vercel).
+
         Returns:
             List of GameAnalysis objects
         """
-        return await self.get_analysis_for_date(date.today().isoformat())
+        return await self.get_analysis_for_date(get_us_eastern_date().isoformat())
 
     async def get_analysis_for_date(self, game_date: str) -> List[GameAnalysis]:
         """
@@ -360,8 +376,8 @@ class GameService:
             GameAnalysis or None if not found
         """
         if game_date is None:
-            game_date = date.today().isoformat()
-        
+            game_date = get_us_eastern_date().isoformat()
+
         kenpom_games = await self.kenpom.get_fanmatch(game_date)
         odds_games = await self.odds.get_all_odds()
         
