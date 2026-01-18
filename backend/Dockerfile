@@ -27,5 +27,5 @@ COPY . .
 # Railway uses dynamic PORT - default to 8000 for local dev
 ENV PORT=8000
 
-# Run the application using shell form to expand $PORT
-CMD uvicorn api.main:app --host 0.0.0.0 --port $PORT
+# Run the application - use sh -c to ensure $PORT is expanded
+CMD ["sh", "-c", "uvicorn api.main:app --host 0.0.0.0 --port ${PORT:-8000}"]

@@ -40,14 +40,13 @@
       "Bash(git init:*)",
       "Bash(git add:*)",
       "Bash(git commit:*)",
-      "Bash(ls:*)",
-      "Bash(npm cache clean:*)",
+      "Bash(git push:*)",
       "Bash(git checkout:*)",
       "Bash(git merge:*)",
-      "Bash(git push:*)",
-      "Bash(gh pr create:*)",
       "Bash(git fetch:*)",
-      "Bash(RAILWAY_INSTALL_DIR=~/.local/bin sh:*)"
+      "Bash(git rebase:*)",
+      "Bash(git stash:*)",
+      "mcp__3a637a3b-e8d4-4975-b4c6-bb2311e983b8__list_projects"
     ]
   }
 }
