@@ -8,9 +8,19 @@ Based on official API documentation.
 import httpx
 import logging
 from typing import Optional, List, Dict, Any
-from datetime import date
+from datetime import date, datetime, timezone, timedelta
 import os
 from dotenv import load_dotenv
+
+
+def _get_us_eastern_date() -> date:
+    """Get the current date in US Eastern timezone."""
+    # US Eastern is UTC-5 (or UTC-4 during DST)
+    # For simplicity, we'll use UTC-5 which is safe for late night UTC times
+    utc_now = datetime.now(timezone.utc)
+    eastern_offset = timedelta(hours=-5)
+    eastern_now = utc_now + eastern_offset
+    return eastern_now.date()
 
 load_dotenv()
 
@@ -292,8 +302,8 @@ class KenPomClient:
         return await self._request(params)
     
     async def get_todays_predictions(self) -> List[Dict[str, Any]]:
-        """Get predictions for today's games."""
-        today = date.today().isoformat()
+        """Get predictions for today's games (using US Eastern timezone)."""
+        today = _get_us_eastern_date().isoformat()
         return await self.get_fanmatch(today)
     
     # ==================== CONFERENCE RATINGS ====================
