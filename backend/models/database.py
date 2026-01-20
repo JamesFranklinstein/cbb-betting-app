@@ -386,3 +386,60 @@ class PredictionAudit(Base):
         Index("idx_prediction_audit_version", "model_version"),
         Index("idx_prediction_audit_created", "created_at"),
     )
+
+
+class StoredBet(Base):
+    """A value bet that was identified and stored for tracking results."""
+    __tablename__ = "stored_bets"
+
+    id = Column(Integer, primary_key=True)
+    bet_id = Column(String(255), unique=True, nullable=False)  # Unique identifier
+    date = Column(String(10), nullable=False)                   # YYYY-MM-DD
+    game_time = Column(String(50))                              # ISO format
+
+    # Teams
+    home_team = Column(String(255), nullable=False)
+    away_team = Column(String(255), nullable=False)
+    home_rank = Column(Integer, default=0)
+    away_rank = Column(Integer, default=0)
+
+    # Bet details
+    bet_type = Column(String(20), nullable=False)              # spread, total, moneyline
+    side = Column(String(100), nullable=False)                 # team name, over, under
+    line = Column(Float)                                        # The line (spread or total)
+    odds = Column(Integer, default=-110)                        # American odds
+    book = Column(String(100))                                  # Recommended book
+
+    # Model predictions
+    model_prob = Column(Float, default=0.0)
+    market_implied_prob = Column(Float, default=0.0)
+    edge = Column(Float, default=0.0)
+    ev = Column(Float, default=0.0)
+    kelly = Column(Float, default=0.0)
+    confidence = Column(String(20), default='low')
+    confidence_score = Column(Float)
+
+    # KenPom vs Vegas
+    kenpom_spread = Column(Float, default=0.0)
+    kenpom_total = Column(Float, default=0.0)
+    vegas_spread = Column(Float, default=0.0)
+    vegas_total = Column(Float, default=0.0)
+
+    # Result (filled in after game completes)
+    result = Column(String(10))                                 # win, loss, push, None
+    home_score = Column(Integer)
+    away_score = Column(Integer)
+    actual_margin = Column(Float)
+    actual_total = Column(Float)
+
+    # Timestamps
+    created_at = Column(DateTime, default=datetime.utcnow)
+    settled_at = Column(DateTime)
+
+    __table_args__ = (
+        Index("idx_stored_bet_date", "date"),
+        Index("idx_stored_bet_result", "result"),
+        Index("idx_stored_bet_confidence", "confidence"),
+        UniqueConstraint("home_team", "away_team", "bet_type", "side", "date",
+                        name="unique_bet_per_game_day"),
+    )

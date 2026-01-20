@@ -419,14 +419,147 @@ async def get_odds_api_usage():
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# ==================== HELPER FUNCTIONS ====================
+
+async def _auto_update_pending_results():
+    """
+    Automatically fetch scores and update pending bet results.
+    Called when fetching bet history to keep results current.
+    """
+    # Get pending bets
+    pending = bet_history_service.get_pending_bets()
+
+    if not pending:
+        return 0
+
+    # Check if any pending bets are from games that should be completed
+    # (games from yesterday or earlier)
+    from datetime import timedelta
+    today = datetime.now().strftime("%Y-%m-%d")
+
+    has_old_pending = any(bet.date < today for bet in pending)
+    if not has_old_pending:
+        return 0
+
+    # Try to get scores from Odds API (completed events)
+    odds_client = OddsAPIClient()
+
+    try:
+        scores_data = await odds_client.get_scores(days_from=3)
+    except Exception as e:
+        logger.warning(f"Could not fetch scores: {e}")
+        return 0
+
+    # Build scores dict with multiple key formats for matching
+    scores = {}
+    for game in scores_data:
+        if game.get("completed"):
+            home_team = game.get("home_team")
+            away_team = game.get("away_team")
+
+            home_score = None
+            away_score = None
+
+            for score in game.get("scores", []):
+                if score.get("name") == home_team:
+                    home_score = int(score.get("score", 0))
+                elif score.get("name") == away_team:
+                    away_score = int(score.get("score", 0))
+
+            if home_score is not None and away_score is not None:
+                score_data = {"home": home_score, "away": away_score}
+                # Store with exact team names
+                key = f"{home_team} vs {away_team}"
+                scores[key] = score_data
+                # Also store normalized versions for fuzzy matching
+                scores[_normalize_team_key(home_team, away_team)] = score_data
+
+    # Match pending bets to scores using fuzzy matching
+    updated = 0
+    for bet in pending:
+        if bet.result is not None:
+            continue
+
+        # Try exact match first
+        game_key = f"{bet.home_team} vs {bet.away_team}"
+        if game_key in scores:
+            score = scores[game_key]
+        else:
+            # Try normalized match
+            normalized_key = _normalize_team_key(bet.home_team, bet.away_team)
+            if normalized_key in scores:
+                score = scores[normalized_key]
+            else:
+                # Try to find a fuzzy match
+                score = _find_matching_score(bet.home_team, bet.away_team, scores)
+                if not score:
+                    continue
+
+        # Update the bet with the score
+        updated += bet_history_service.update_single_bet_result(
+            bet.bet_id,
+            score["home"],
+            score["away"]
+        )
+
+    if updated > 0:
+        logger.info(f"Auto-updated {updated} bet results")
+
+    return updated
+
+
+def _normalize_team_key(home: str, away: str) -> str:
+    """Normalize team names for matching."""
+    def normalize(name: str) -> str:
+        # Remove common suffixes and normalize
+        name = name.lower().strip()
+        # Remove state abbreviations like "St." or "State"
+        name = name.replace(" st.", " state").replace(" st ", " state ")
+        # Remove "university" and common words
+        for word in ["university", "college", "the "]:
+            name = name.replace(word, "")
+        return name.strip()
+
+    return f"{normalize(home)} vs {normalize(away)}"
+
+
+def _find_matching_score(home_team: str, away_team: str, scores: dict) -> Optional[dict]:
+    """Find a matching score using fuzzy matching on team names."""
+    home_lower = home_team.lower()
+    away_lower = away_team.lower()
+
+    for key, score in scores.items():
+        key_lower = key.lower()
+        # Check if both team names appear in the key (in any order)
+        home_words = home_lower.split()
+        away_words = away_lower.split()
+
+        # Check for significant word matches
+        home_match = any(word in key_lower for word in home_words if len(word) > 3)
+        away_match = any(word in key_lower for word in away_words if len(word) > 3)
+
+        if home_match and away_match:
+            return score
+
+    return None
+
+
 # ==================== BET HISTORY ENDPOINTS ====================
 
 @app.get("/api/bet-history")
 async def get_bet_history(
-    days: int = Query(30, description="Number of days of history to return")
+    days: int = Query(30, description="Number of days of history to return"),
+    auto_update: bool = Query(True, description="Auto-fetch and update results for pending bets")
 ):
     """Get bet history with results for the last N days."""
     try:
+        # Auto-update pending results if requested
+        if auto_update:
+            try:
+                await _auto_update_pending_results()
+            except Exception as e:
+                logger.warning(f"Auto-update of results failed: {e}")
+
         history = bet_history_service.get_history_for_display(days)
         return history
     except Exception as e:
@@ -1050,14 +1183,9 @@ async def get_scheduler_status():
 async def fetch_and_update_results():
     """
     Fetch completed game scores and update bet results automatically.
-    This endpoint checks for games from yesterday that have completed.
+    This endpoint checks for games from the past few days that have completed.
     """
     try:
-        from datetime import timedelta
-
-        # Get yesterday's date
-        yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
-
         # Get pending bets
         pending = bet_history_service.get_pending_bets()
 
@@ -1067,13 +1195,12 @@ async def fetch_and_update_results():
         # Try to get scores from Odds API (completed events)
         odds_client = OddsAPIClient()
 
-        # Get scores for basketball_ncaab
         try:
-            scores_data = await odds_client.get_scores("basketball_ncaab", days_from=2)
+            scores_data = await odds_client.get_scores(days_from=3)
         except Exception as e:
             return {"error": f"Could not fetch scores: {str(e)}", "updated": 0}
 
-        # Build scores dict
+        # Build scores dict with multiple key formats for matching
         scores = {}
         for game in scores_data:
             if game.get("completed"):
@@ -1090,22 +1217,46 @@ async def fetch_and_update_results():
                         away_score = int(score.get("score", 0))
 
                 if home_score is not None and away_score is not None:
+                    score_data = {"home": home_score, "away": away_score}
                     key = f"{home_team} vs {away_team}"
-                    scores[key] = {"home": home_score, "away": away_score}
+                    scores[key] = score_data
+                    scores[_normalize_team_key(home_team, away_team)] = score_data
 
-        # Update results
-        updated = bet_history_service.update_results(scores)
+        # Match pending bets to scores using fuzzy matching
+        updated = 0
+        for bet in pending:
+            if bet.result is not None:
+                continue
+
+            game_key = f"{bet.home_team} vs {bet.away_team}"
+            if game_key in scores:
+                score = scores[game_key]
+            else:
+                normalized_key = _normalize_team_key(bet.home_team, bet.away_team)
+                if normalized_key in scores:
+                    score = scores[normalized_key]
+                else:
+                    score = _find_matching_score(bet.home_team, bet.away_team, scores)
+                    if not score:
+                        continue
+
+            updated += bet_history_service.update_single_bet_result(
+                bet.bet_id,
+                score["home"],
+                score["away"]
+            )
 
         return {
-            "games_found": len(scores),
+            "games_found": len(scores) // 2,  # Divided by 2 since we store twice
             "bets_updated": updated,
-            "message": f"Found {len(scores)} completed games, updated {updated} bets"
+            "pending_remaining": len(pending) - updated,
+            "message": f"Found {len(scores)//2} completed games, updated {updated} bets"
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# ==================== HELPER FUNCTIONS ====================
+# ==================== RESPONSE CONVERSION HELPERS ====================
 
 def _stat_comparison_to_response(stat_comparison) -> Optional[TeamStatComparisonResponse]:
     """Convert TeamStatComparison to response model."""

@@ -2,58 +2,21 @@
 Bet History Service
 
 Automatically stores value bets and tracks results after games complete.
+Uses PostgreSQL for persistent storage (works with Vercel Postgres).
 """
 
-import json
-import os
-from datetime import datetime, timedelta, timezone
+import logging
+from datetime import datetime, timedelta
 from typing import List, Dict, Any, Optional
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass
 
+from sqlalchemy.orm import Session
+from sqlalchemy.exc import IntegrityError
 
-@dataclass
-class StoredBet:
-    """A value bet that was identified and stored for tracking."""
-    id: str
-    date: str                          # Date bet was identified (YYYY-MM-DD)
-    game_time: str                     # ISO format game time
-    home_team: str
-    away_team: str
-    home_rank: int
-    away_rank: int
+from models.connection import SessionLocal
+from models.database import StoredBet as StoredBetModel
 
-    # Bet details
-    bet_type: str                      # spread, total, moneyline
-    side: str                          # team name, over, under
-    line: Optional[float]              # The line (spread or total)
-    odds: int                          # American odds
-    book: str                          # Recommended book
-
-    # Model predictions
-    model_prob: float
-    market_implied_prob: float
-    edge: float
-    ev: float
-    kelly: float
-    confidence: str
-    confidence_score: Optional[float] = None
-
-    # KenPom vs Vegas
-    kenpom_spread: float = 0.0
-    kenpom_total: float = 0.0
-    vegas_spread: float = 0.0
-    vegas_total: float = 0.0
-
-    # Result (filled in after game completes)
-    result: Optional[str] = None       # win, loss, push
-    home_score: Optional[int] = None
-    away_score: Optional[int] = None
-    actual_margin: Optional[float] = None
-    actual_total: Optional[float] = None
-
-    # Timestamps
-    created_at: str = ""
-    settled_at: Optional[str] = None
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -77,7 +40,7 @@ class DailyBetSummary:
     # By type
     spread_bets: int = 0
     spread_wins: int = 0
-    total_bets_count: int = 0  # Renamed to avoid conflict
+    total_bets_count: int = 0
     total_wins: int = 0
     ml_bets: int = 0
     ml_wins: int = 0
@@ -93,7 +56,6 @@ class DailyBetSummary:
 
     @property
     def high_conf_win_rate(self) -> float:
-        decided = self.high_conf_bets - self.pushes  # Approximate
         return self.high_conf_wins / self.high_conf_bets if self.high_conf_bets > 0 else 0.0
 
 
@@ -130,7 +92,7 @@ class OverallStats:
 
     # Streaks
     current_streak: int = 0
-    streak_type: str = ""  # "W" or "L"
+    streak_type: str = ""
     longest_win_streak: int = 0
     longest_loss_streak: int = 0
 
@@ -144,42 +106,22 @@ class OverallStats:
 class BetHistoryService:
     """
     Service for storing and tracking bet history with automatic result detection.
+    Uses PostgreSQL for persistent storage.
     """
 
-    def __init__(self, storage_path: str = None):
+    def __init__(self):
         """Initialize the bet history service."""
-        if storage_path is None:
-            home_dir = os.path.expanduser("~")
-            storage_dir = os.path.join(home_dir, ".cbb_betting")
-            os.makedirs(storage_dir, exist_ok=True)
-            storage_path = os.path.join(storage_dir, "bet_history.json")
+        pass
 
-        self.storage_path = storage_path
-        self.bets: List[StoredBet] = []
-        self._load_bets()
-
-    def _load_bets(self) -> None:
-        """Load bets from storage file."""
-        if os.path.exists(self.storage_path):
-            try:
-                with open(self.storage_path, 'r') as f:
-                    data = json.load(f)
-                    self.bets = [StoredBet(**bet) for bet in data]
-            except (json.JSONDecodeError, TypeError) as e:
-                print(f"Warning: Could not load bet history: {e}")
-                self.bets = []
-
-    def _save_bets(self) -> None:
-        """Save bets to storage file."""
-        data = [asdict(bet) for bet in self.bets]
-        with open(self.storage_path, 'w') as f:
-            json.dump(data, f, indent=2)
+    def _get_session(self) -> Session:
+        """Get a database session."""
+        return SessionLocal()
 
     def store_value_bet(
         self,
         game_data: Dict[str, Any],
         bet_data: Dict[str, Any]
-    ) -> StoredBet:
+    ) -> Optional[StoredBetModel]:
         """
         Store a new value bet for tracking.
 
@@ -188,73 +130,69 @@ class BetHistoryService:
             bet_data: Bet details (type, side, odds, edge, etc.)
 
         Returns:
-            The stored bet record
+            The stored bet record or None if already exists
         """
-        # Generate unique ID
-        bet_id = f"{game_data['home_team']}_{game_data['away_team']}_{bet_data['type']}_{bet_data['side']}_{datetime.now().strftime('%Y%m%d%H%M%S')}"
+        session = self._get_session()
+        try:
+            today = datetime.now().strftime("%Y-%m-%d")
 
-        # Check if this exact bet already exists for today
-        today = datetime.now().strftime("%Y-%m-%d")
-        existing = self._find_existing_bet(
-            game_data['home_team'],
-            game_data['away_team'],
-            bet_data['type'],
-            bet_data['side'],
-            today
-        )
+            # Generate unique ID
+            bet_id = f"{game_data['home_team']}_{game_data['away_team']}_{bet_data['type']}_{bet_data['side']}_{datetime.now().strftime('%Y%m%d%H%M%S')}"
 
-        if existing:
-            # Update existing bet instead of creating duplicate
-            return existing
+            # Check if this exact bet already exists for today
+            existing = session.query(StoredBetModel).filter(
+                StoredBetModel.home_team == game_data['home_team'],
+                StoredBetModel.away_team == game_data['away_team'],
+                StoredBetModel.bet_type == bet_data['type'],
+                StoredBetModel.side == bet_data['side'],
+                StoredBetModel.date == today
+            ).first()
 
-        stored_bet = StoredBet(
-            id=bet_id,
-            date=today,
-            game_time=game_data.get('game_time', ''),
-            home_team=game_data['home_team'],
-            away_team=game_data['away_team'],
-            home_rank=game_data.get('home_rank', 0),
-            away_rank=game_data.get('away_rank', 0),
-            bet_type=bet_data['type'],
-            side=bet_data['side'],
-            line=bet_data.get('line'),
-            odds=bet_data.get('odds', -110),
-            book=bet_data.get('book', ''),
-            model_prob=bet_data.get('model_prob', 0.0),
-            market_implied_prob=bet_data.get('market_implied_prob', 0.0),
-            edge=bet_data.get('edge', 0.0),
-            ev=bet_data.get('ev', 0.0),
-            kelly=bet_data.get('kelly', 0.0),
-            confidence=bet_data.get('confidence', 'low'),
-            confidence_score=bet_data.get('confidence_score'),
-            kenpom_spread=game_data.get('kenpom_spread', 0.0),
-            kenpom_total=game_data.get('kenpom_total', 0.0),
-            vegas_spread=game_data.get('vegas_spread', 0.0),
-            vegas_total=game_data.get('vegas_total', 0.0),
-            created_at=datetime.now().isoformat()
-        )
+            if existing:
+                return existing
 
-        self.bets.append(stored_bet)
-        self._save_bets()
-        return stored_bet
+            stored_bet = StoredBetModel(
+                bet_id=bet_id,
+                date=today,
+                game_time=game_data.get('game_time', ''),
+                home_team=game_data['home_team'],
+                away_team=game_data['away_team'],
+                home_rank=game_data.get('home_rank', 0),
+                away_rank=game_data.get('away_rank', 0),
+                bet_type=bet_data['type'],
+                side=bet_data['side'],
+                line=bet_data.get('line'),
+                odds=bet_data.get('odds', -110),
+                book=bet_data.get('book', ''),
+                model_prob=bet_data.get('model_prob', 0.0),
+                market_implied_prob=bet_data.get('market_implied_prob', 0.0),
+                edge=bet_data.get('edge', 0.0),
+                ev=bet_data.get('ev', 0.0),
+                kelly=bet_data.get('kelly', 0.0),
+                confidence=bet_data.get('confidence', 'low'),
+                confidence_score=bet_data.get('confidence_score'),
+                kenpom_spread=game_data.get('kenpom_spread', 0.0),
+                kenpom_total=game_data.get('kenpom_total', 0.0),
+                vegas_spread=game_data.get('vegas_spread', 0.0),
+                vegas_total=game_data.get('vegas_total', 0.0),
+                created_at=datetime.utcnow()
+            )
 
-    def _find_existing_bet(
-        self,
-        home_team: str,
-        away_team: str,
-        bet_type: str,
-        side: str,
-        date: str
-    ) -> Optional[StoredBet]:
-        """Find an existing bet matching these criteria."""
-        for bet in self.bets:
-            if (bet.home_team == home_team and
-                bet.away_team == away_team and
-                bet.bet_type == bet_type and
-                bet.side == side and
-                bet.date == date):
-                return bet
-        return None
+            session.add(stored_bet)
+            session.commit()
+            session.refresh(stored_bet)
+            return stored_bet
+
+        except IntegrityError:
+            session.rollback()
+            logger.warning(f"Duplicate bet detected, skipping")
+            return None
+        except Exception as e:
+            session.rollback()
+            logger.error(f"Error storing bet: {e}")
+            raise
+        finally:
+            session.close()
 
     def store_all_value_bets(self, value_bets_data: List[Dict[str, Any]]) -> int:
         """
@@ -295,16 +233,8 @@ class BetHistoryService:
                 'confidence_score': vb['bet'].get('confidence_score')
             }
 
-            existing = self._find_existing_bet(
-                game_data['home_team'],
-                game_data['away_team'],
-                bet_data['type'],
-                bet_data['side'],
-                datetime.now().strftime("%Y-%m-%d")
-            )
-
-            if not existing:
-                self.store_value_bet(game_data, bet_data)
+            result = self.store_value_bet(game_data, bet_data)
+            if result and not hasattr(result, '_existing'):
                 count += 1
 
         return count
@@ -319,20 +249,65 @@ class BetHistoryService:
         Returns:
             Number of bets updated
         """
-        updated = 0
+        session = self._get_session()
+        try:
+            # Get all pending bets
+            pending_bets = session.query(StoredBetModel).filter(
+                StoredBetModel.result.is_(None)
+            ).all()
 
-        for bet in self.bets:
-            if bet.result is not None:
-                continue  # Already settled
+            updated = 0
+            for bet in pending_bets:
+                # Look up the game score
+                game_key = f"{bet.home_team} vs {bet.away_team}"
+                if game_key not in scores:
+                    continue
 
-            # Look up the game score
-            game_key = f"{bet.home_team} vs {bet.away_team}"
-            if game_key not in scores:
-                continue
+                score = scores[game_key]
+                home_score = score['home']
+                away_score = score['away']
 
-            score = scores[game_key]
-            home_score = score['home']
-            away_score = score['away']
+                bet.home_score = home_score
+                bet.away_score = away_score
+                bet.actual_margin = home_score - away_score
+                bet.actual_total = home_score + away_score
+
+                # Determine result
+                bet.result = self._determine_result(bet)
+                bet.settled_at = datetime.utcnow()
+                updated += 1
+
+            session.commit()
+            return updated
+
+        except Exception as e:
+            session.rollback()
+            logger.error(f"Error updating results: {e}")
+            raise
+        finally:
+            session.close()
+
+    def update_single_bet_result(self, bet_id: str, home_score: int, away_score: int) -> int:
+        """
+        Update a single bet's result with the final score.
+
+        Args:
+            bet_id: The bet's unique identifier
+            home_score: Final home team score
+            away_score: Final away team score
+
+        Returns:
+            1 if updated, 0 if not found or already settled
+        """
+        session = self._get_session()
+        try:
+            bet = session.query(StoredBetModel).filter(
+                StoredBetModel.bet_id == bet_id,
+                StoredBetModel.result.is_(None)
+            ).first()
+
+            if not bet:
+                return 0
 
             bet.home_score = home_score
             bet.away_score = away_score
@@ -341,31 +316,31 @@ class BetHistoryService:
 
             # Determine result
             bet.result = self._determine_result(bet)
-            bet.settled_at = datetime.now().isoformat()
-            updated += 1
+            bet.settled_at = datetime.utcnow()
 
-        if updated > 0:
-            self._save_bets()
+            session.commit()
+            return 1
 
-        return updated
+        except Exception as e:
+            session.rollback()
+            logger.error(f"Error updating single bet result: {e}")
+            return 0
+        finally:
+            session.close()
 
-    def _determine_result(self, bet: StoredBet) -> str:
+    def _determine_result(self, bet: StoredBetModel) -> Optional[str]:
         """Determine if a bet won, lost, or pushed."""
         if bet.actual_margin is None or bet.actual_total is None:
             return None
 
         if bet.bet_type == 'spread':
-            # Spread bet: did the side cover?
             line = bet.line or 0
 
             if bet.side == bet.home_team:
                 # Home team spread bet
-                # Home covers if actual_margin > -line
-                # E.g., line = -6.5 (home -6.5), home covers if margin > 6.5
                 cover_margin = bet.actual_margin + line
             else:
                 # Away team spread bet
-                # Away covers if -actual_margin > line (or actual_margin < -line)
                 cover_margin = -bet.actual_margin - line
 
             if cover_margin > 0:
@@ -411,18 +386,46 @@ class BetHistoryService:
 
         return None
 
-    def get_bets_by_date(self, date: str) -> List[StoredBet]:
+    def get_bets_by_date(self, date: str) -> List[StoredBetModel]:
         """Get all bets for a specific date."""
-        return [bet for bet in self.bets if bet.date == date]
+        session = self._get_session()
+        try:
+            return session.query(StoredBetModel).filter(
+                StoredBetModel.date == date
+            ).all()
+        finally:
+            session.close()
 
-    def get_pending_bets(self) -> List[StoredBet]:
+    def get_pending_bets(self) -> List[StoredBetModel]:
         """Get all bets awaiting results."""
-        return [bet for bet in self.bets if bet.result is None]
+        session = self._get_session()
+        try:
+            return session.query(StoredBetModel).filter(
+                StoredBetModel.result.is_(None)
+            ).all()
+        finally:
+            session.close()
 
-    def get_recent_bets(self, days: int = 7) -> List[StoredBet]:
+    def get_recent_bets(self, days: int = 7) -> List[StoredBetModel]:
         """Get bets from the last N days."""
-        cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
-        return [bet for bet in self.bets if bet.date >= cutoff]
+        session = self._get_session()
+        try:
+            cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+            return session.query(StoredBetModel).filter(
+                StoredBetModel.date >= cutoff
+            ).order_by(StoredBetModel.created_at.desc()).all()
+        finally:
+            session.close()
+
+    def get_all_bets(self) -> List[StoredBetModel]:
+        """Get all bets."""
+        session = self._get_session()
+        try:
+            return session.query(StoredBetModel).order_by(
+                StoredBetModel.created_at.desc()
+            ).all()
+        finally:
+            session.close()
 
     def get_daily_summary(self, date: str) -> DailyBetSummary:
         """Get summary statistics for a specific day."""
@@ -435,8 +438,8 @@ class BetHistoryService:
         evs = []
 
         for bet in day_bets:
-            edges.append(bet.edge)
-            evs.append(bet.ev)
+            edges.append(bet.edge or 0)
+            evs.append(bet.ev or 0)
 
             if bet.result == 'win':
                 summary.wins += 1
@@ -482,8 +485,10 @@ class BetHistoryService:
 
     def get_overall_stats(self) -> OverallStats:
         """Calculate overall betting statistics."""
+        bets = self.get_all_bets()
+
         stats = OverallStats()
-        stats.total_bets = len(self.bets)
+        stats.total_bets = len(bets)
 
         # Track by category
         high_w, high_l, high_p = 0, 0, 0
@@ -500,9 +505,9 @@ class BetHistoryService:
         # For streaks
         results_in_order = []
 
-        for bet in sorted(self.bets, key=lambda x: x.created_at):
-            edges.append(bet.edge)
-            evs.append(bet.ev)
+        for bet in sorted(bets, key=lambda x: x.created_at or datetime.min):
+            edges.append(bet.edge or 0)
+            evs.append(bet.ev or 0)
 
             if bet.result == 'win':
                 stats.total_wins += 1
@@ -631,12 +636,9 @@ class BetHistoryService:
         """Get bet history formatted for frontend display."""
         recent_bets = self.get_recent_bets(days)
 
-        # Sort by date descending, then by game time
-        recent_bets.sort(key=lambda x: (x.date, x.game_time), reverse=True)
-
         return [
             {
-                'id': bet.id,
+                'id': bet.bet_id,
                 'date': bet.date,
                 'game_time': bet.game_time,
                 'home_team': bet.home_team,
@@ -670,10 +672,17 @@ class BetHistoryService:
 
     def clear_old_bets(self, days: int = 90) -> int:
         """Remove bets older than specified days."""
-        cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
-        original_count = len(self.bets)
-        self.bets = [bet for bet in self.bets if bet.date >= cutoff]
-        removed = original_count - len(self.bets)
-        if removed > 0:
-            self._save_bets()
-        return removed
+        session = self._get_session()
+        try:
+            cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+            result = session.query(StoredBetModel).filter(
+                StoredBetModel.date < cutoff
+            ).delete()
+            session.commit()
+            return result
+        except Exception as e:
+            session.rollback()
+            logger.error(f"Error clearing old bets: {e}")
+            raise
+        finally:
+            session.close()
