@@ -45,7 +45,11 @@
       "Bash(git merge:*)",
       "Bash(git fetch:*)",
       "Bash(git rebase:*)",
-      "Bash(git stash:*)"
+      "Bash(git stash:*)",
+      "Bash(railway --version:*)",
+      "Bash(npx railway --version)",
+      "Bash(npx railway:*)",
+      "Bash(git pull:*)"
     ]
   }
 }
