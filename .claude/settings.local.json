@@ -49,7 +49,8 @@
       "Bash(railway --version:*)",
       "Bash(npx railway --version)",
       "Bash(npx railway:*)",
-      "Bash(git pull:*)"
+      "Bash(git pull:*)",
+      "Bash(ls:*)"
     ]
   }
 }
