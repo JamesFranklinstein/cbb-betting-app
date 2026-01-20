@@ -45,8 +45,7 @@
       "Bash(git merge:*)",
       "Bash(git fetch:*)",
       "Bash(git rebase:*)",
-      "Bash(git stash:*)",
-      "mcp__3a637a3b-e8d4-4975-b4c6-bb2311e983b8__list_projects"
+      "Bash(git stash:*)"
     ]
   }
 }
