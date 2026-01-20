@@ -834,6 +834,73 @@ async def debug_all_bet_dates():
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.get("/api/bet-history/debug/match-test")
+async def debug_match_test():
+    """Debug endpoint to test team name matching between pending bets and Odds API scores."""
+    try:
+        pending = bet_history_service.get_pending_bets()
+        if not pending:
+            return {"message": "No pending bets"}
+
+        odds_client = OddsAPIClient()
+        scores_data = await odds_client.get_scores(days_from=3)
+
+        # Build scores dict
+        scores = {}
+        raw_games = []
+        for game in scores_data:
+            if game.get("completed"):
+                home_team = game.get("home_team")
+                away_team = game.get("away_team")
+                raw_games.append({"home": home_team, "away": away_team})
+
+                home_score = None
+                away_score = None
+                for score in game.get("scores", []):
+                    if score.get("name") == home_team:
+                        home_score = int(score.get("score", 0))
+                    elif score.get("name") == away_team:
+                        away_score = int(score.get("score", 0))
+
+                if home_score is not None and away_score is not None:
+                    score_data = {"home": home_score, "away": away_score}
+                    key = f"{home_team} vs {away_team}"
+                    scores[key] = score_data
+                    scores[_normalize_team_key(home_team, away_team)] = score_data
+
+        # Check each pending bet for matches
+        match_results = []
+        for bet in pending[:10]:  # Limit to first 10 for readability
+            bet_key = f"{bet.home_team} vs {bet.away_team}"
+            normalized_bet_key = _normalize_team_key(bet.home_team, bet.away_team)
+
+            # Check exact match
+            exact_match = bet_key in scores
+            normalized_match = normalized_bet_key in scores
+
+            # Check fuzzy match
+            fuzzy_result = _find_matching_score(bet.home_team, bet.away_team, scores)
+
+            match_results.append({
+                "bet_teams": bet_key,
+                "normalized_bet": normalized_bet_key,
+                "exact_match": exact_match,
+                "normalized_match": normalized_match,
+                "fuzzy_match_found": fuzzy_result is not None,
+                "fuzzy_score": fuzzy_result
+            })
+
+        return {
+            "pending_bets": len(pending),
+            "completed_games_from_api": len(raw_games),
+            "sample_api_games": raw_games[:10],
+            "score_keys": list(scores.keys())[:20],
+            "match_results": match_results
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 # ==================== ML MANAGEMENT ENDPOINTS ====================
 
 class MLVersionResponse(BaseModel):
