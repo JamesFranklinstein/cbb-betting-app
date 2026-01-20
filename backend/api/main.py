@@ -29,7 +29,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # CORS configuration - set allowed origins from environment or use defaults
-DEFAULT_ORIGINS = "http://localhost:3000,http://127.0.0.1:3000,https://frontend-indol-omega-55.vercel.app,https://cbb-betting-app.vercel.app"
+DEFAULT_ORIGINS = "http://localhost:3000,http://127.0.0.1:3000,https://frontend-indol-omega-55.vercel.app,https://cbb-betting-app.vercel.app,https://indianriver.ai,https://www.indianriver.ai"
 ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", DEFAULT_ORIGINS).split(",")
 
 # Check if running on Vercel (serverless)
