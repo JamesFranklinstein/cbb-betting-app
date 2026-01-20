@@ -777,6 +777,63 @@ async def get_pending_bets():
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.get("/api/bet-history/debug/{date}")
+async def debug_bets_by_date(date: str):
+    """Debug endpoint to check bets for a specific date (format: YYYY-MM-DD)."""
+    try:
+        bets = bet_history_service.get_bets_by_date(date)
+        return {
+            "date": date,
+            "total_bets": len(bets),
+            "bets": [
+                {
+                    "id": bet.bet_id,
+                    "date": bet.date,
+                    "game_time": bet.game_time,
+                    "home_team": bet.home_team,
+                    "away_team": bet.away_team,
+                    "bet_type": bet.bet_type,
+                    "side": bet.side,
+                    "line": bet.line,
+                    "odds": bet.odds,
+                    "confidence": bet.confidence,
+                    "result": bet.result,
+                    "home_score": bet.home_score,
+                    "away_score": bet.away_score,
+                    "actual_margin": bet.actual_margin,
+                    "settled_at": str(bet.settled_at) if bet.settled_at else None,
+                    "created_at": str(bet.created_at) if bet.created_at else None
+                }
+                for bet in bets
+            ]
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/bet-history/debug/all-dates")
+async def debug_all_bet_dates():
+    """Debug endpoint to see all unique dates with bet counts."""
+    try:
+        all_bets = bet_history_service.get_all_bets()
+        date_counts = {}
+        for bet in all_bets:
+            if bet.date not in date_counts:
+                date_counts[bet.date] = {"total": 0, "pending": 0, "graded": 0}
+            date_counts[bet.date]["total"] += 1
+            if bet.result is None:
+                date_counts[bet.date]["pending"] += 1
+            else:
+                date_counts[bet.date]["graded"] += 1
+
+        return {
+            "total_bets": len(all_bets),
+            "dates": dict(sorted(date_counts.items(), reverse=True))
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 # ==================== ML MANAGEMENT ENDPOINTS ====================
 
 class MLVersionResponse(BaseModel):
