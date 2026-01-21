@@ -954,8 +954,8 @@ async def reset_bet_result(bet_id: str):
     try:
         session = SessionLocal()
         try:
-            from models.bet_history import BetRecord
-            bet = session.query(BetRecord).filter(BetRecord.bet_id == bet_id).first()
+            from models.database import StoredBet
+            bet = session.query(StoredBet).filter(StoredBet.bet_id == bet_id).first()
             if not bet:
                 raise HTTPException(status_code=404, detail=f"Bet not found: {bet_id}")
 
