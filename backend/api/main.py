@@ -573,34 +573,53 @@ def _get_team_variations(team_name: str) -> List[str]:
 
 
 def _find_matching_score(home_team: str, away_team: str, scores: dict) -> Optional[dict]:
-    """Find a matching score using improved fuzzy matching on team names."""
+    """Find a matching score using improved fuzzy matching on team names.
+
+    IMPORTANT: Must match BOTH teams distinctly - can't match same API team to both bet teams.
+    """
     home_variations = _get_team_variations(home_team)
     away_variations = _get_team_variations(away_team)
 
     for key, score in scores.items():
         key_lower = key.lower()
 
-        # Check if any home variation matches
-        home_match = False
-        for var in home_variations:
-            # Check if the variation is in the key
-            var_words = var.split()
-            # Primary word (first significant word) must match
-            primary_words = [w for w in var_words if len(w) > 3]
-            if primary_words and any(w in key_lower for w in primary_words):
-                home_match = True
-                break
+        # Split the key into home and away parts (format: "Team1 vs Team2")
+        if " vs " not in key_lower:
+            continue
+        api_home_part, api_away_part = key_lower.split(" vs ", 1)
 
-        # Check if any away variation matches
-        away_match = False
+        # Check if home team matches EITHER part of the API game
+        home_matches_api_home = False
+        home_matches_api_away = False
+        for var in home_variations:
+            var_words = var.split()
+            primary_words = [w for w in var_words if len(w) > 3]
+            if primary_words:
+                if any(w in api_home_part for w in primary_words):
+                    home_matches_api_home = True
+                if any(w in api_away_part for w in primary_words):
+                    home_matches_api_away = True
+
+        # Check if away team matches EITHER part of the API game
+        away_matches_api_home = False
+        away_matches_api_away = False
         for var in away_variations:
             var_words = var.split()
             primary_words = [w for w in var_words if len(w) > 3]
-            if primary_words and any(w in key_lower for w in primary_words):
-                away_match = True
-                break
+            if primary_words:
+                if any(w in api_home_part for w in primary_words):
+                    away_matches_api_home = True
+                if any(w in api_away_part for w in primary_words):
+                    away_matches_api_away = True
 
-        if home_match and away_match:
+        # Valid match: home matches one side AND away matches the OTHER side
+        # (home->api_home AND away->api_away) OR (home->api_away AND away->api_home)
+        valid_match = (
+            (home_matches_api_home and away_matches_api_away) or
+            (home_matches_api_away and away_matches_api_home)
+        )
+
+        if valid_match:
             return score
 
     return None

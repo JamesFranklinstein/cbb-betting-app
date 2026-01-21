@@ -50,7 +50,9 @@
       "Bash(npx railway --version)",
       "Bash(npx railway:*)",
       "Bash(git pull:*)",
-      "Bash(ls:*)"
+      "Bash(ls:*)",
+      "Bash(xargs cat:*)",
+      "Bash(gh pr create:*)"
     ]
   }
 }
