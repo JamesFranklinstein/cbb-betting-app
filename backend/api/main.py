@@ -948,6 +948,39 @@ async def debug_match_test():
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.post("/api/bet-history/reset/{bet_id}")
+async def reset_bet_result(bet_id: str):
+    """Reset a bet's result back to pending (for fixing incorrect grades)."""
+    try:
+        session = SessionLocal()
+        try:
+            from models.bet_history import BetRecord
+            bet = session.query(BetRecord).filter(BetRecord.bet_id == bet_id).first()
+            if not bet:
+                raise HTTPException(status_code=404, detail=f"Bet not found: {bet_id}")
+
+            old_result = bet.result
+            bet.result = None
+            bet.home_score = None
+            bet.away_score = None
+            bet.actual_margin = None
+            bet.actual_total = None
+            session.commit()
+
+            return {
+                "status": "success",
+                "bet_id": bet_id,
+                "old_result": old_result,
+                "message": f"Bet reset to pending"
+            }
+        finally:
+            session.close()
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.get("/api/bet-history/debug/{date}")
 async def debug_bets_by_date(date: str):
     """Debug endpoint to check bets for a specific date (format: YYYY-MM-DD)."""
