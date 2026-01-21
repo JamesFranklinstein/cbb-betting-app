@@ -523,20 +523,82 @@ def _normalize_team_key(home: str, away: str) -> str:
     return f"{normalize(home)} vs {normalize(away)}"
 
 
+# Common team name mappings (KenPom name -> Odds API variations)
+TEAM_NAME_ALIASES = {
+    "miami fl": ["miami", "miami hurricanes"],
+    "miami oh": ["miami (oh)", "miami redhawks", "miami ohio"],
+    "florida st.": ["florida state", "florida st", "fsu"],
+    "michigan st.": ["michigan state", "michigan st", "msu"],
+    "ohio st.": ["ohio state", "ohio st", "osu"],
+    "penn st.": ["penn state", "penn st", "psu"],
+    "st. john's": ["st john's", "st johns", "saint john's"],
+    "st. bonaventure": ["st bonaventure", "saint bonaventure"],
+    "texas a&m": ["texas am", "texas a&m aggies"],
+    "unc": ["north carolina", "tar heels"],
+    "uconn": ["connecticut", "huskies"],
+    "lsu": ["louisiana state"],
+    "ucf": ["central florida", "knights"],
+    "unlv": ["nevada las vegas"],
+    "utep": ["texas el paso"],
+    "vcu": ["virginia commonwealth"],
+    "smu": ["southern methodist"],
+    "tcu": ["texas christian"],
+    "byu": ["brigham young"],
+}
+
+
+def _get_team_variations(team_name: str) -> List[str]:
+    """Get all possible variations of a team name for matching."""
+    team_lower = team_name.lower().strip()
+    variations = [team_lower]
+
+    # Add aliases if they exist
+    if team_lower in TEAM_NAME_ALIASES:
+        variations.extend(TEAM_NAME_ALIASES[team_lower])
+
+    # Also check if team_lower is contained in any alias key
+    for key, aliases in TEAM_NAME_ALIASES.items():
+        if key in team_lower or team_lower in key:
+            variations.extend(aliases)
+            variations.append(key)
+
+    # Normalize St./State variations
+    if " st." in team_lower:
+        variations.append(team_lower.replace(" st.", " state"))
+    if " state" in team_lower:
+        variations.append(team_lower.replace(" state", " st."))
+        variations.append(team_lower.replace(" state", " st"))
+
+    return list(set(variations))
+
+
 def _find_matching_score(home_team: str, away_team: str, scores: dict) -> Optional[dict]:
-    """Find a matching score using fuzzy matching on team names."""
-    home_lower = home_team.lower()
-    away_lower = away_team.lower()
+    """Find a matching score using improved fuzzy matching on team names."""
+    home_variations = _get_team_variations(home_team)
+    away_variations = _get_team_variations(away_team)
 
     for key, score in scores.items():
         key_lower = key.lower()
-        # Check if both team names appear in the key (in any order)
-        home_words = home_lower.split()
-        away_words = away_lower.split()
 
-        # Check for significant word matches
-        home_match = any(word in key_lower for word in home_words if len(word) > 3)
-        away_match = any(word in key_lower for word in away_words if len(word) > 3)
+        # Check if any home variation matches
+        home_match = False
+        for var in home_variations:
+            # Check if the variation is in the key
+            var_words = var.split()
+            # Primary word (first significant word) must match
+            primary_words = [w for w in var_words if len(w) > 3]
+            if primary_words and any(w in key_lower for w in primary_words):
+                home_match = True
+                break
+
+        # Check if any away variation matches
+        away_match = False
+        for var in away_variations:
+            var_words = var.split()
+            primary_words = [w for w in var_words if len(w) > 3]
+            if primary_words and any(w in key_lower for w in primary_words):
+                away_match = True
+                break
 
         if home_match and away_match:
             return score
