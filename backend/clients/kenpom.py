@@ -302,9 +302,30 @@ class KenPomClient:
         return await self._request(params)
     
     async def get_todays_predictions(self) -> List[Dict[str, Any]]:
-        """Get predictions for today's games (using US Eastern timezone)."""
-        today = _get_us_eastern_date().isoformat()
-        return await self.get_fanmatch(today)
+        """Get predictions for today's games (using US Eastern timezone).
+
+        Falls back to yesterday's date if today's data is not yet available.
+        """
+        today = _get_us_eastern_date()
+        today_str = today.isoformat()
+
+        try:
+            result = await self.get_fanmatch(today_str)
+            if result:  # If we got data, return it
+                return result
+        except Exception as e:
+            logger.warning(f"Failed to get predictions for today ({today_str}): {e}")
+
+        # Fallback to yesterday if today's data is empty or failed
+        yesterday = today - timedelta(days=1)
+        yesterday_str = yesterday.isoformat()
+        logger.info(f"Falling back to yesterday's predictions ({yesterday_str})")
+
+        try:
+            return await self.get_fanmatch(yesterday_str)
+        except Exception as e:
+            logger.error(f"Failed to get predictions for yesterday ({yesterday_str}): {e}")
+            raise KenPomClientError(f"No predictions available for today or yesterday")
     
     # ==================== CONFERENCE RATINGS ====================
     
