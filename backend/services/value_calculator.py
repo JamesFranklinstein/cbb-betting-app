@@ -1007,6 +1007,12 @@ class ValueCalculator:
     MIN_EDGE_TOTAL = 0.03     # 3% edge on totals (unchanged - performing well)
     MIN_EDGE_ML = 0.08        # 8% edge on moneyline (was 5%)
 
+    # Maximum edge cap - edges above this are almost certainly data issues
+    # rather than true value opportunities. Large discrepancies between
+    # KenPom and Vegas usually indicate stale data or team mismatches.
+    MAX_EDGE_CAP = 0.25       # 25% max edge - anything higher is suspicious
+    MAX_EV_CAP = 1.0          # 100% max EV - prevents unrealistic +1000% displays
+
     # Standard deviation for spread outcomes (typical for college basketball)
     BASE_SPREAD_STD_DEV = 10.0
     BASE_TOTAL_STD_DEV = 12.0
@@ -1489,23 +1495,42 @@ class ValueCalculator:
     def calculate_kelly(self, prob: float, odds: int) -> float:
         """
         Calculate Kelly criterion bet size.
-        
+
         Args:
             prob: Our estimated probability of winning
             odds: American odds
-            
+
         Returns:
             Recommended bet size as fraction of bankroll
         """
         decimal_odds = self.american_to_decimal(odds)
         q = 1 - prob
         b = decimal_odds - 1
-        
+
         kelly = (prob * b - q) / b
-        
+
         # Apply fractional Kelly and cap at reasonable maximum
         kelly = max(0, kelly * self.KELLY_FRACTION)
         return min(kelly, 0.10)  # Cap at 10% of bankroll
+
+    def cap_edge_and_ev(self, edge: float, ev: float) -> tuple:
+        """
+        Cap edge and EV at reasonable maximums to prevent unrealistic displays.
+
+        Large discrepancies between model predictions and market odds usually indicate
+        data issues (stale KenPom data, team name mismatches, etc.) rather than
+        true value opportunities.
+
+        Args:
+            edge: Raw calculated edge
+            ev: Raw calculated expected value
+
+        Returns:
+            Tuple of (capped_edge, capped_ev)
+        """
+        capped_edge = min(edge, self.MAX_EDGE_CAP)
+        capped_ev = min(ev, self.MAX_EV_CAP)
+        return capped_edge, capped_ev
     
     def get_confidence_level(self, edge: float, bet_type: BetType) -> str:
         """Categorize confidence based on edge size (legacy method for backwards compatibility)."""
@@ -2323,6 +2348,10 @@ class ValueCalculator:
                 away_stats=away_stats
             )
 
+            # Cap edge and EV to prevent unrealistic displays from data discrepancies
+            raw_ev = self.calculate_ev(home_cover_prob, market.best_spread_home_odds)
+            capped_edge, capped_ev = self.cap_edge_and_ev(home_edge, raw_ev)
+
             values.append(ValueBet(
                 home_team=prediction.home_team,
                 away_team=prediction.away_team,
@@ -2333,8 +2362,8 @@ class ValueCalculator:
                 market_odds=market.best_spread_home_odds,
                 market_line=market.spread,
                 market_implied_prob=home_implied,
-                edge=home_edge,
-                ev=self.calculate_ev(home_cover_prob, market.best_spread_home_odds),
+                edge=capped_edge,
+                ev=capped_ev,
                 kelly_fraction=self.calculate_kelly(home_cover_prob, market.best_spread_home_odds),
                 recommended_book=market.best_spread_home_book,
                 confidence=confidence_tier,
@@ -2363,6 +2392,10 @@ class ValueCalculator:
                 away_stats=away_stats
             )
 
+            # Cap edge and EV to prevent unrealistic displays from data discrepancies
+            raw_ev = self.calculate_ev(away_cover_prob, market.best_spread_away_odds)
+            capped_edge, capped_ev = self.cap_edge_and_ev(away_edge, raw_ev)
+
             values.append(ValueBet(
                 home_team=prediction.home_team,
                 away_team=prediction.away_team,
@@ -2373,8 +2406,8 @@ class ValueCalculator:
                 market_odds=market.best_spread_away_odds,
                 market_line=-market.spread,
                 market_implied_prob=away_implied,
-                edge=away_edge,
-                ev=self.calculate_ev(away_cover_prob, market.best_spread_away_odds),
+                edge=capped_edge,
+                ev=capped_ev,
                 kelly_fraction=self.calculate_kelly(away_cover_prob, market.best_spread_away_odds),
                 recommended_book=market.best_spread_away_book,
                 confidence=confidence_tier,
@@ -2440,6 +2473,10 @@ class ValueCalculator:
                 away_stats=away_stats
             )
 
+            # Cap edge and EV to prevent unrealistic displays from data discrepancies
+            raw_ev = self.calculate_ev(over_prob, market.best_over_odds)
+            capped_edge, capped_ev = self.cap_edge_and_ev(over_edge, raw_ev)
+
             values.append(ValueBet(
                 home_team=prediction.home_team,
                 away_team=prediction.away_team,
@@ -2450,8 +2487,8 @@ class ValueCalculator:
                 market_odds=market.best_over_odds,
                 market_line=market.total,
                 market_implied_prob=over_implied,
-                edge=over_edge,
-                ev=self.calculate_ev(over_prob, market.best_over_odds),
+                edge=capped_edge,
+                ev=capped_ev,
                 kelly_fraction=self.calculate_kelly(over_prob, market.best_over_odds),
                 recommended_book=market.best_over_book,
                 confidence=confidence_tier,
@@ -2479,6 +2516,10 @@ class ValueCalculator:
                 away_stats=away_stats
             )
 
+            # Cap edge and EV to prevent unrealistic displays from data discrepancies
+            raw_ev = self.calculate_ev(under_prob, market.best_under_odds)
+            capped_edge, capped_ev = self.cap_edge_and_ev(under_edge, raw_ev)
+
             values.append(ValueBet(
                 home_team=prediction.home_team,
                 away_team=prediction.away_team,
@@ -2489,8 +2530,8 @@ class ValueCalculator:
                 market_odds=market.best_under_odds,
                 market_line=market.total,
                 market_implied_prob=under_implied,
-                edge=under_edge,
-                ev=self.calculate_ev(under_prob, market.best_under_odds),
+                edge=capped_edge,
+                ev=capped_ev,
                 kelly_fraction=self.calculate_kelly(under_prob, market.best_under_odds),
                 recommended_book=market.best_under_book,
                 confidence=confidence_tier,
@@ -2546,6 +2587,10 @@ class ValueCalculator:
                 away_stats=away_stats
             )
 
+            # Cap edge and EV to prevent unrealistic displays from data discrepancies
+            raw_ev = self.calculate_ev(prediction.home_win_prob, market.best_ml_home_odds)
+            capped_edge, capped_ev = self.cap_edge_and_ev(home_edge, raw_ev)
+
             values.append(ValueBet(
                 home_team=prediction.home_team,
                 away_team=prediction.away_team,
@@ -2556,8 +2601,8 @@ class ValueCalculator:
                 market_odds=market.best_ml_home_odds,
                 market_line=None,
                 market_implied_prob=home_implied,
-                edge=home_edge,
-                ev=self.calculate_ev(prediction.home_win_prob, market.best_ml_home_odds),
+                edge=capped_edge,
+                ev=capped_ev,
                 kelly_fraction=self.calculate_kelly(prediction.home_win_prob, market.best_ml_home_odds),
                 recommended_book=market.best_ml_home_book,
                 confidence=confidence_tier,
@@ -2585,6 +2630,10 @@ class ValueCalculator:
                 away_stats=away_stats
             )
 
+            # Cap edge and EV to prevent unrealistic displays from data discrepancies
+            raw_ev = self.calculate_ev(prediction.away_win_prob, market.best_ml_away_odds)
+            capped_edge, capped_ev = self.cap_edge_and_ev(away_edge, raw_ev)
+
             values.append(ValueBet(
                 home_team=prediction.home_team,
                 away_team=prediction.away_team,
@@ -2595,8 +2644,8 @@ class ValueCalculator:
                 market_odds=market.best_ml_away_odds,
                 market_line=None,
                 market_implied_prob=away_implied,
-                edge=away_edge,
-                ev=self.calculate_ev(prediction.away_win_prob, market.best_ml_away_odds),
+                edge=capped_edge,
+                ev=capped_ev,
                 kelly_fraction=self.calculate_kelly(prediction.away_win_prob, market.best_ml_away_odds),
                 recommended_book=market.best_ml_away_book,
                 confidence=confidence_tier,
@@ -2605,7 +2654,7 @@ class ValueCalculator:
             ))
 
         return values
-    
+
     # ==================== FORMATTING ====================
     
     def format_value_bet(self, vb: ValueBet, show_details: bool = False) -> str:
