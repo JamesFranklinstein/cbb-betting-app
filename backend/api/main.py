@@ -102,6 +102,14 @@ class TeamStatComparisonResponse(BaseModel):
     turnover_edge: str
 
 
+class DataQualityWarningResponse(BaseModel):
+    """Warning about potential data quality issues."""
+    code: str
+    severity: str
+    message: str
+    details: dict = {}
+
+
 class GameAnalysisResponse(BaseModel):
     home_team: str
     away_team: str
@@ -129,6 +137,9 @@ class GameAnalysisResponse(BaseModel):
     # Team statistics comparison
     stat_comparison: Optional[TeamStatComparisonResponse] = None
     major_stat_diffs: List[StatDifferenceResponse] = []
+
+    # Data quality warnings
+    data_warnings: List[DataQualityWarningResponse] = []
 
 
 class TeamRatingResponse(BaseModel):
@@ -256,6 +267,17 @@ async def get_value_bets(
                     "tempo_mismatch": analysis.stat_comparison.tempo_mismatch
                 }
 
+            # Build data warnings list
+            data_warnings = []
+            if analysis.data_warnings:
+                for w in analysis.data_warnings:
+                    data_warnings.append({
+                        "code": w.code,
+                        "severity": w.severity,
+                        "message": w.message,
+                        "details": w.details
+                    })
+
             for vb in value_bets:
                 if bet_type is None or vb.bet_type.value == bet_type:
                     results.append({
@@ -284,7 +306,8 @@ async def get_value_bets(
                             "confidence_factors": vb.confidence_factors
                         },
                         "major_stat_diffs": major_stat_diffs,
-                        "stat_summary": stat_summary
+                        "stat_summary": stat_summary,
+                        "data_warnings": data_warnings
                     })
 
         # Sort by confidence: high first, then medium, then low
@@ -1603,7 +1626,16 @@ def _analysis_to_response(analysis) -> GameAnalysisResponse:
             for vb in analysis.value_bets
         ],
         stat_comparison=stat_comparison_response,
-        major_stat_diffs=major_diffs
+        major_stat_diffs=major_diffs,
+        data_warnings=[
+            DataQualityWarningResponse(
+                code=w.code,
+                severity=w.severity,
+                message=w.message,
+                details=w.details
+            )
+            for w in (analysis.data_warnings or [])
+        ]
     )
 
 
