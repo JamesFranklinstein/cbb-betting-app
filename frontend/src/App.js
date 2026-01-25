@@ -492,8 +492,24 @@ function ValueBetCard({ bet }) {
 
   const valueReasons = getValueExplanation();
 
+  // Check for high severity data warnings
+  const hasHighSeverityWarning = bet.data_warnings?.some(w => w.severity === 'high');
+
   return (
-    <div className={`value-bet-card ${getConfidenceClass(bet.bet.confidence)}`}>
+    <div className={`value-bet-card ${getConfidenceClass(bet.bet.confidence)} ${hasHighSeverityWarning ? 'has-warning' : ''}`}>
+      {/* Data Quality Warning Banner */}
+      {bet.data_warnings && bet.data_warnings.length > 0 && (
+        <div className={`data-warning-banner ${hasHighSeverityWarning ? 'high' : 'medium'}`}>
+          <span className="warning-icon">⚠️</span>
+          <div className="warning-content">
+            <span className="warning-title">Data Quality Warning</span>
+            <span className="warning-message">
+              {bet.data_warnings[0].message}
+            </span>
+          </div>
+        </div>
+      )}
+
       {/* Header with matchup and time */}
       <div className="bet-header">
         <span className="game-teams">
@@ -1978,6 +1994,60 @@ const styles = `
 
   .value-bet-card.confidence-low {
     border-left-color: #64748b;
+  }
+
+  .value-bet-card.has-warning {
+    border-top: 3px solid #f59e0b;
+  }
+
+  .data-warning-banner {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    padding: 12px;
+    margin: -20px -20px 16px -20px;
+    border-radius: 8px 8px 0 0;
+    background: linear-gradient(135deg, #78350f 0%, #451a03 100%);
+    border-bottom: 1px solid #f59e0b40;
+  }
+
+  .data-warning-banner.high {
+    background: linear-gradient(135deg, #7f1d1d 0%, #450a0a 100%);
+    border-bottom-color: #ef444440;
+  }
+
+  .data-warning-banner .warning-icon {
+    font-size: 16px;
+    flex-shrink: 0;
+    margin-top: 2px;
+  }
+
+  .data-warning-banner .warning-content {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+
+  .data-warning-banner .warning-title {
+    font-size: 11px;
+    font-weight: 600;
+    color: #fbbf24;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+
+  .data-warning-banner.high .warning-title {
+    color: #f87171;
+  }
+
+  .data-warning-banner .warning-message {
+    font-size: 12px;
+    color: #fef3c7;
+    line-height: 1.4;
+  }
+
+  .data-warning-banner.high .warning-message {
+    color: #fecaca;
   }
 
   .bet-header {
