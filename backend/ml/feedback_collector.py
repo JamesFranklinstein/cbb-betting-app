@@ -113,8 +113,12 @@ class FeedbackCollector:
         home_rating = self._get_team_rating(game.home_team_id, game.scheduled_time)
         away_rating = self._get_team_rating(game.away_team_id, game.scheduled_time)
 
-        # Build feature dict from ratings
-        features = self._build_features_from_ratings(home_rating, away_rating)
+        # Build feature dict from ratings (with game date for situational features)
+        features = self._build_features_from_ratings(
+            home_rating, away_rating,
+            game_date=game.scheduled_time,
+            is_conference_game=False  # TODO: detect from game data if available
+        )
 
         # Find ML and KenPom predictions
         ml_pred = None
@@ -204,14 +208,20 @@ class FeedbackCollector:
     def _build_features_from_ratings(
         self,
         home_rating: Optional[Dict[str, Any]],
-        away_rating: Optional[Dict[str, Any]]
+        away_rating: Optional[Dict[str, Any]],
+        game_date: datetime = None,
+        is_conference_game: bool = False
     ) -> Dict[str, float]:
         """
         Build feature dictionary from team ratings.
 
+        UPDATED: Now includes situational features for improved model accuracy.
+
         Args:
             home_rating: Home team rating dict
             away_rating: Away team rating dict
+            game_date: Date of the game for time-of-season features
+            is_conference_game: Whether this is a conference game
 
         Returns:
             Dict of feature differentials
@@ -245,6 +255,85 @@ class FeedbackCollector:
             'effective_height_diff': 0.0,
             'height_vs_tempo': 0.0,
         }
+
+        # NEW: Add situational features
+        features.update(self._build_situational_features(
+            game_date=game_date,
+            home_conf=home_rating.get('conference', ''),
+            away_conf=away_rating.get('conference', ''),
+            is_conference_game=is_conference_game,
+            home_conf_strength=home_rating.get('conf_adj_em', 0),
+            away_conf_strength=away_rating.get('conf_adj_em', 0)
+        ))
+
+        return features
+
+    def _build_situational_features(
+        self,
+        game_date: datetime = None,
+        home_conf: str = '',
+        away_conf: str = '',
+        is_conference_game: bool = False,
+        home_rest_days: int = 3,
+        away_rest_days: int = 3,
+        travel_distance: float = 0,
+        home_conf_strength: float = 0,
+        away_conf_strength: float = 0
+    ) -> Dict[str, float]:
+        """
+        Build situational features for training data.
+
+        Args:
+            game_date: Date of the game
+            home_conf: Home team conference
+            away_conf: Away team conference
+            is_conference_game: Whether this is a conference game
+            home_rest_days: Days since home team's last game
+            away_rest_days: Days since away team's last game
+            travel_distance: Travel distance in miles
+            home_conf_strength: Home conference average AdjEM
+            away_conf_strength: Away conference average AdjEM
+
+        Returns:
+            Dict with situational feature values
+        """
+        features = {}
+
+        # Days of season (normalized 0-1)
+        if game_date:
+            # Season typically starts Nov 1
+            if game_date.tzinfo is None:
+                game_date = game_date.replace(tzinfo=timezone.utc)
+            season_start = datetime(
+                game_date.year if game_date.month >= 8 else game_date.year - 1,
+                11, 1, tzinfo=timezone.utc
+            )
+            days_since_start = (game_date - season_start).days
+            features["days_of_season"] = min(max(days_since_start, 0), 150) / 150.0
+        else:
+            features["days_of_season"] = 0.5  # Default to mid-season
+
+        # Conference indicators
+        is_same_conf = 1.0 if (home_conf and away_conf and home_conf == away_conf) else 0.0
+        features["is_conference_game"] = float(is_conference_game or is_same_conf)
+        features["is_same_conference"] = is_same_conf
+
+        # Rest days (normalized 0-1)
+        features["home_rest_days"] = min(home_rest_days, 7) / 7.0
+        features["away_rest_days"] = min(away_rest_days, 7) / 7.0
+        features["rest_advantage"] = (home_rest_days - away_rest_days) / 7.0
+
+        # Back-to-back indicators
+        features["home_back_to_back"] = 1.0 if home_rest_days <= 1 else 0.0
+        features["away_back_to_back"] = 1.0 if away_rest_days <= 1 else 0.0
+
+        # Travel distance (normalized)
+        features["travel_distance"] = min(travel_distance, 3000) / 1000.0
+
+        # Conference strength (normalized)
+        features["home_conf_strength"] = home_conf_strength / 20.0
+        features["away_conf_strength"] = away_conf_strength / 20.0
+        features["conf_strength_diff"] = (home_conf_strength - away_conf_strength) / 20.0
 
         return features
 

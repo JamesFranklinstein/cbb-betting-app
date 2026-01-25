@@ -65,7 +65,7 @@ class MLPredictor:
 
     MODEL_VERSION = "v2.0"
 
-    # Feature columns for the model (updated with height features)
+    # Feature columns for the model (updated with height and situational features)
     FEATURE_COLUMNS = [
         # Team efficiency differentials
         "adj_em_diff",      # Adjusted efficiency margin
@@ -97,15 +97,35 @@ class MLPredictor:
         "home_win_streak",
         "away_win_streak",
 
-        # Height features (NEW - with low weight)
+        # Height features (with low weight)
         "height_diff",              # Average height differential (inches)
         "effective_height_diff",    # Height weighted by roster continuity
         "height_vs_tempo",          # Height-tempo interaction
+
+        # NEW: Situational features
+        "days_of_season",           # Days since Nov 1 (season start) - captures time of season
+        "is_conference_game",       # Binary: 1 if conference game
+        "is_same_conference",       # Binary: 1 if same conference (derived)
+        "home_rest_days",           # Days since home team's last game
+        "away_rest_days",           # Days since away team's last game
+        "rest_advantage",           # home_rest - away_rest (positive = home rested more)
+        "home_back_to_back",        # Binary: 1 if home team on back-to-back
+        "away_back_to_back",        # Binary: 1 if away team on back-to-back
+        "travel_distance",          # Estimated travel distance for away team (miles/100)
+
+        # NEW: Conference strength adjustments
+        "home_conf_strength",       # Home team's conference average AdjEM
+        "away_conf_strength",       # Away team's conference average AdjEM
+        "conf_strength_diff",       # Difference in conference strength
     ]
 
     # Indices of height features for special weighting
     HEIGHT_FEATURE_INDICES = (18, 19, 20)
     HEIGHT_WEIGHT = 0.33  # Height features get 1/3 the normal weight
+
+    # NEW: Indices of situational features (low weight - supplementary signals)
+    SITUATIONAL_FEATURE_INDICES = tuple(range(21, 33))  # Indices 21-32
+    SITUATIONAL_WEIGHT = 0.5  # Situational features get 1/2 normal weight
 
     def __init__(self, model_dir: str = "./models", use_pytorch: bool = True):
         """
@@ -156,7 +176,9 @@ class MLPredictor:
         self,
         home_team_stats: Dict[str, float],
         away_team_stats: Dict[str, float],
-        neutral_site: bool = False
+        neutral_site: bool = False,
+        game_date: datetime = None,
+        situational: Dict[str, Any] = None
     ) -> PredictionResult:
         """
         Make a prediction for a game.
@@ -165,12 +187,17 @@ class MLPredictor:
             home_team_stats: KenPom stats for home team
             away_team_stats: KenPom stats for away team
             neutral_site: Whether game is at neutral site
+            game_date: Optional game date for time-of-season features
+            situational: Optional dict with rest days, travel, conference info
 
         Returns:
             PredictionResult with probabilities and predictions
         """
-        # Create feature vector
-        features = self._create_features(home_team_stats, away_team_stats, neutral_site)
+        # Create feature vector with new situational features
+        features = self._create_features(
+            home_team_stats, away_team_stats, neutral_site,
+            game_date=game_date, situational=situational
+        )
 
         # Use PyTorch if available and preferred
         if self.use_pytorch and self.pytorch_trainer is not None:
@@ -425,9 +452,19 @@ class MLPredictor:
         self,
         home_stats: Dict[str, float],
         away_stats: Dict[str, float],
-        neutral_site: bool
+        neutral_site: bool,
+        game_date: datetime = None,
+        situational: Dict[str, Any] = None
     ) -> Dict[str, float]:
-        """Create feature dictionary from team stats including height features."""
+        """Create feature dictionary from team stats including height and situational features.
+
+        Args:
+            home_stats: KenPom stats for home team
+            away_stats: KenPom stats for away team
+            neutral_site: Whether game is at neutral site
+            game_date: Optional game date for time-of-season features
+            situational: Optional dict with rest days, travel, etc.
+        """
         features = {}
 
         # Calculate differentials (home - away)
@@ -461,8 +498,87 @@ class MLPredictor:
         features["home_win_streak"] = home_stats.get("win_streak", 0)
         features["away_win_streak"] = away_stats.get("win_streak", 0)
 
-        # Height features (NEW)
+        # Height features
         features.update(self._calculate_height_features(home_stats, away_stats))
+
+        # NEW: Situational features
+        features.update(self._calculate_situational_features(
+            home_stats, away_stats, game_date, situational
+        ))
+
+        return features
+
+    def _calculate_situational_features(
+        self,
+        home_stats: Dict[str, float],
+        away_stats: Dict[str, float],
+        game_date: datetime = None,
+        situational: Dict[str, Any] = None
+    ) -> Dict[str, float]:
+        """
+        Calculate situational features for improved predictions.
+
+        These features capture:
+        - Time of season (early season ratings less reliable)
+        - Conference game indicator
+        - Rest days and back-to-back situations
+        - Travel distance impact
+        - Conference strength adjustments
+
+        Args:
+            home_stats: Home team stats including conference
+            away_stats: Away team stats including conference
+            game_date: Date of the game
+            situational: Dict with rest_days, travel info, etc.
+
+        Returns:
+            Dict with situational feature values
+        """
+        situational = situational or {}
+        features = {}
+
+        # 1. Days of season (0 = Nov 1, captures early season uncertainty)
+        if game_date:
+            # Season typically starts Nov 1
+            season_start = datetime(game_date.year if game_date.month >= 8 else game_date.year - 1, 11, 1, tzinfo=timezone.utc)
+            if game_date.tzinfo is None:
+                game_date = game_date.replace(tzinfo=timezone.utc)
+            days_since_start = (game_date - season_start).days
+            # Normalize: 0-150 days typical season -> 0-1 scale
+            features["days_of_season"] = min(max(days_since_start, 0), 150) / 150.0
+        else:
+            features["days_of_season"] = 0.5  # Default to mid-season
+
+        # 2. Conference game indicators
+        home_conf = home_stats.get("conference", "")
+        away_conf = away_stats.get("conference", "")
+        is_same_conf = 1.0 if (home_conf and away_conf and home_conf == away_conf) else 0.0
+        features["is_conference_game"] = situational.get("is_conference_game", is_same_conf)
+        features["is_same_conference"] = is_same_conf
+
+        # 3. Rest days and back-to-back
+        home_rest = situational.get("home_rest_days", 3)  # Default 3 days
+        away_rest = situational.get("away_rest_days", 3)
+        features["home_rest_days"] = min(home_rest, 7) / 7.0  # Normalize, cap at 7
+        features["away_rest_days"] = min(away_rest, 7) / 7.0
+        features["rest_advantage"] = (home_rest - away_rest) / 7.0  # Positive = home more rested
+
+        # Back-to-back detection (played yesterday)
+        features["home_back_to_back"] = 1.0 if home_rest <= 1 else 0.0
+        features["away_back_to_back"] = 1.0 if away_rest <= 1 else 0.0
+
+        # 4. Travel distance (normalized by 1000 miles)
+        # Large travel = fatigue for away team
+        travel = situational.get("travel_distance", 0)
+        features["travel_distance"] = min(travel, 3000) / 1000.0  # Cap at 3000 miles
+
+        # 5. Conference strength adjustments
+        # Average AdjEM for each conference (helps detect weak/strong conference games)
+        home_conf_strength = home_stats.get("conf_adj_em", 0)
+        away_conf_strength = away_stats.get("conf_adj_em", 0)
+        features["home_conf_strength"] = home_conf_strength / 20.0  # Normalize ~(-10, +10) range
+        features["away_conf_strength"] = away_conf_strength / 20.0
+        features["conf_strength_diff"] = (home_conf_strength - away_conf_strength) / 20.0
 
         return features
 

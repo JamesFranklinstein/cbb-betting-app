@@ -372,31 +372,41 @@ class ValueBet:
 class ConfidenceFactors:
     """Detailed breakdown of factors contributing to confidence assessment.
 
-    Scoring breakdown (0-75 points max, scaled to tier):
-    - Edge: 0-30 points (raw edge size)
+    UPDATED: Added bet type strength modifier based on historical performance.
+    Totals are performing at 54% (profitable), while spreads (44%) and ML (39%)
+    underperform. This factor boosts confidence for bet types with proven edge.
+
+    Scoring breakdown (0-85 points max, scaled to tier):
+    - Edge: 0-40 points (raw edge size)
     - Statistical: 0-20 points (team stat advantages)
     - Model agreement: 0-15 points (KenPom vs ML agreement)
     - Situational: 0-10 points (rest, travel, rivalry)
-    - Variance penalty: -10 to 0 points
+    - Bet type strength: 0-5 points (NEW - historical bet type performance)
+    - Early season penalty: -5 to 0 points (NEW - less reliable early)
+    - Variance penalty: -5 to 0 points
     """
-    edge_score: float = 0.0           # Raw edge contribution (0-30 points)
+    edge_score: float = 0.0           # Raw edge contribution (0-40 points)
     statistical_edge_score: float = 0.0  # Team stat advantages (0-20 points)
     model_agreement_score: float = 0.0   # KenPom vs ML agreement (0-15 points)
     situational_score: float = 0.0    # Rest, travel, rivalry factors (0-10 points)
-    variance_penalty: float = 0.0     # High variance reduces confidence (-10 to 0)
+    bet_type_strength_score: float = 0.0  # NEW: Historical bet type performance (0-5 points)
+    early_season_penalty: float = 0.0  # NEW: Penalty for early season games (-5 to 0)
+    variance_penalty: float = 0.0     # High variance reduces confidence (-5 to 0)
 
     # Individual factor details for transparency
     factors_detail: Dict[str, Any] = field(default_factory=dict)
 
     @property
     def total_score(self) -> float:
-        """Total confidence score (0-80 scale, displayed as-is).
+        """Total confidence score (0-85 scale, displayed as-is).
 
         Components:
         - Edge: 0-40 points (PRIMARY factor)
         - Statistical: 0-20 points
         - Model agreement: 7-15 points
         - Situational: 5-10 points
+        - Bet type strength: 0-5 points (NEW)
+        - Early season penalty: -5 to 0 (NEW)
         - Variance penalty: -5 to 0
         """
         raw = (
@@ -404,13 +414,19 @@ class ConfidenceFactors:
             self.statistical_edge_score +
             self.model_agreement_score +
             self.situational_score +
+            self.bet_type_strength_score +
+            self.early_season_penalty +
             self.variance_penalty
         )
-        return max(0, min(80, raw))
+        return max(0, min(85, raw))
 
     @property
     def confidence_tier(self) -> str:
         """Convert score to tier.
+
+        UPDATED: Raised thresholds to improve differentiation between tiers.
+        Historical data showed High (47%) and Medium (47%) performed identically,
+        indicating thresholds were too low.
 
         Edge is now the PRIMARY factor (0-40 points):
         - Edge: 0-40 points (primary - strong edge = high confidence)
@@ -418,18 +434,24 @@ class ConfidenceFactors:
         - Model agreement: 7-15 points (7 min for single model)
         - Situational: 5-10 points (5 default)
         - Variance penalty: -5 to 0 (reduced impact)
+        - Bet type strength: 0-5 points (NEW - totals get boost)
 
-        Max theoretical: 80 points
+        Max theoretical: 85 points
 
         Examples with single model + default situational (12 base):
-        - 4% edge (~14 pts) + 12 = 26 (Low)
-        - 6% edge (~24 pts) + 12 = 36 (Medium)
-        - 8% edge (~32 pts) + 12 = 44 (High)
-        - 10% edge (~36 pts) + 12 = 48 (High)
+        - 5% edge (~20 pts) + 12 = 32 (Low - need strong supporting factors)
+        - 7% edge (~28 pts) + 12 = 40 (Medium)
+        - 9% edge (~34 pts) + 12 = 46 (Medium-High boundary)
+        - 12% edge (~40 pts) + 12 = 52 (High)
+
+        NEW THRESHOLDS:
+        - High: >= 50 (was 40) - requires excellent edge OR multiple strong factors
+        - Medium: >= 38 (was 30) - requires good edge with supporting factors
+        - Low: < 38
         """
-        if self.total_score >= 40:
+        if self.total_score >= 50:
             return "high"
-        elif self.total_score >= 30:
+        elif self.total_score >= 38:
             return "medium"
         else:
             return "low"
@@ -977,9 +999,13 @@ class ValueCalculator:
     """
 
     # Minimum edge required to flag as a value bet
-    MIN_EDGE_SPREAD = 0.03    # 3% edge on spread
-    MIN_EDGE_TOTAL = 0.03     # 3% edge on totals
-    MIN_EDGE_ML = 0.05        # 5% edge on moneyline
+    # UPDATED: Increased thresholds based on historical performance analysis
+    # Spreads: 44% win rate at 3% threshold -> raise to 5%
+    # ML: 39% win rate at 5% threshold -> raise to 8%
+    # Totals: 54% win rate at 3% -> keep at 3% (working well)
+    MIN_EDGE_SPREAD = 0.05    # 5% edge on spread (was 3%)
+    MIN_EDGE_TOTAL = 0.03     # 3% edge on totals (unchanged - performing well)
+    MIN_EDGE_ML = 0.08        # 8% edge on moneyline (was 5%)
 
     # Standard deviation for spread outcomes (typical for college basketball)
     BASE_SPREAD_STD_DEV = 10.0
@@ -1015,24 +1041,37 @@ class ValueCalculator:
     def calculate_adjusted_spread_std_dev(
         self,
         home_stats: Optional[TeamStats],
-        away_stats: Optional[TeamStats]
+        away_stats: Optional[TeamStats],
+        is_conference_game: bool = False,
+        home_rest_days: int = 3,
+        away_rest_days: int = 3,
+        days_into_season: int = 60
     ) -> float:
         """
         Calculate game-specific standard deviation for spread based on team characteristics.
+
+        ENHANCED: Now includes conference game, rest, and time-of-season adjustments.
 
         Higher variance games (higher std dev) include:
         - Teams that rely heavily on 3-point shooting (more volatile)
         - Tempo mismatches (unpredictable game flow)
         - Low experience teams (less consistent)
+        - Early season games (ratings less reliable)
+        - Back-to-back situations
 
         Lower variance games (lower std dev) include:
         - Experienced teams
         - Interior-focused offenses
         - Similar tempo teams
+        - Conference games (teams know each other)
+        - Well-rested teams
         """
         std_dev = self.BASE_SPREAD_STD_DEV
 
         if not home_stats or not away_stats:
+            # Still apply non-team-specific adjustments
+            if days_into_season < 30:
+                std_dev += 1.5  # Early season penalty
             return std_dev
 
         # Adjust for 3-point reliance (more 3s = more variance)
@@ -1053,27 +1092,60 @@ class ValueCalculator:
         if tempo_diff > self.TEMPO_MISMATCH_THRESHOLD:
             std_dev += (tempo_diff - self.TEMPO_MISMATCH_THRESHOLD) * 0.2
 
+        # NEW: Conference games are more predictable (teams know each other)
+        if is_conference_game:
+            std_dev -= 0.5
+
+        # NEW: Back-to-back situations increase variance
+        if home_rest_days <= 1:
+            std_dev += 0.8  # Home team fatigue adds uncertainty
+        if away_rest_days <= 1:
+            std_dev += 0.8  # Away team fatigue adds uncertainty
+
+        # NEW: Early season games have higher variance (ratings less reliable)
+        if days_into_season < 20:
+            std_dev += 2.0  # Very early season
+        elif days_into_season < 40:
+            std_dev += 1.0  # Early season
+        elif days_into_season < 60:
+            std_dev += 0.5  # Still ramping up
+
+        # NEW: SOS-based adjustment (weak schedule = less reliable ratings)
+        home_sos_tier = home_stats.schedule_strength_tier
+        away_sos_tier = away_stats.schedule_strength_tier
+        if home_sos_tier == "weak" or away_sos_tier == "weak":
+            std_dev += 0.5
+
         # Ensure std_dev stays in reasonable range
-        return max(8.0, min(14.0, std_dev))
+        return max(8.0, min(16.0, std_dev))
 
     def calculate_adjusted_total_std_dev(
         self,
         home_stats: Optional[TeamStats],
         away_stats: Optional[TeamStats],
-        predicted_tempo: float = 0
+        predicted_tempo: float = 0,
+        is_conference_game: bool = False,
+        days_into_season: int = 60
     ) -> float:
         """
         Calculate game-specific standard deviation for totals.
+
+        ENHANCED: Now includes conference game and time-of-season adjustments.
 
         Factors that affect total variance:
         - Game tempo (faster pace = more variance in total)
         - 3-point shooting reliance
         - Defensive consistency
-        - NEW: Average Possession Length (APL) data
+        - Average Possession Length (APL) data
+        - Conference games (more predictable)
+        - Time of season (early = less reliable)
         """
         std_dev = self.BASE_TOTAL_STD_DEV
 
         if not home_stats or not away_stats:
+            # Still apply non-team-specific adjustments
+            if days_into_season < 30:
+                std_dev += 1.5
             return std_dev
 
         # Adjust for average tempo
@@ -1088,7 +1160,7 @@ class ValueCalculator:
         ) / 2
         std_dev += avg_3pt_reliance * 4.0  # Up to ~1.5 points extra std dev
 
-        # NEW: Use APL data for more accurate pace predictions
+        # Use APL data for more accurate pace predictions
         # Teams with extreme pace factors (very fast or very slow) tend to be
         # more predictable on totals - reduce std dev
         home_pace = home_stats.pace_factor
@@ -1101,7 +1173,19 @@ class ValueCalculator:
                 # Reduce variance for more extreme paces (more predictable)
                 std_dev -= pace_deviation * 3.0
 
-        return max(9.0, min(16.0, std_dev))
+        # NEW: Conference games are more predictable (teams know each other)
+        if is_conference_game:
+            std_dev -= 0.5
+
+        # NEW: Early season games have higher variance (ratings less reliable)
+        if days_into_season < 20:
+            std_dev += 2.0  # Very early season
+        elif days_into_season < 40:
+            std_dev += 1.0  # Early season
+        elif days_into_season < 60:
+            std_dev += 0.5  # Still ramping up
+
+        return max(9.0, min(18.0, std_dev))
 
     def calculate_matchup_edge_boost(
         self,
@@ -1453,28 +1537,33 @@ class ValueCalculator:
         line_movement: Optional[Dict[str, float]] = None,
         home_stats: Optional[TeamStats] = None,
         away_stats: Optional[TeamStats] = None,
+        game_date: Optional[datetime] = None,
         **kwargs  # Accept but ignore unused params for backwards compatibility
     ) -> ConfidenceFactors:
         """
         Calculate comprehensive confidence score using multiple factors.
 
+        UPDATED: Added bet type strength modifier and early season penalty.
+
         This multi-factor approach provides more accurate value assessment than
         simple edge thresholds by considering:
-        1. Raw edge size and EV (0-30 points)
+        1. Raw edge size and EV (0-40 points)
         2. Statistical matchup advantages (0-20 points)
         3. Model agreement (KenPom vs ML) (0-15 points)
         4. Situational factors (0-10 points)
-        5. Game variance characteristics (-10 to 0 penalty)
+        5. Bet type strength (0-5 points) - NEW
+        6. Early season penalty (-5 to 0) - NEW
+        7. Game variance characteristics (-5 to 0 penalty)
 
-        Max score: 75 points
-        High: >= 45, Medium: >= 30, Low: < 30
+        Max score: 85 points
+        High: >= 50, Medium: >= 38, Low: < 38
 
         Returns:
             ConfidenceFactors with detailed scoring breakdown
         """
         factors = ConfidenceFactors(factors_detail={})
 
-        # 1. EDGE SCORE (0-30 points)
+        # 1. EDGE SCORE (0-40 points)
         # Larger edges indicate stronger value opportunities
         factors.edge_score = self._score_edge(edge, bet_type)
         factors.factors_detail["edge"] = {
@@ -1540,7 +1629,26 @@ class ValueCalculator:
                 "note": "Standard game conditions assumed"
             }
 
-        # 5. VARIANCE PENALTY (-10 to 0 points)
+        # 5. BET TYPE STRENGTH SCORE (0-5 points) - NEW
+        # Based on historical performance: Totals (54%) > Spreads (44%) > ML (39%)
+        factors.bet_type_strength_score = self._score_bet_type_strength(bet_type)
+        factors.factors_detail["bet_type_strength"] = {
+            "score": factors.bet_type_strength_score,
+            "bet_type": bet_type.value,
+            "note": "Based on historical model performance by bet type"
+        }
+
+        # 6. EARLY SEASON PENALTY (-5 to 0 points) - NEW
+        # KenPom ratings are less reliable early in season (before ~25 games)
+        factors.early_season_penalty = self._calculate_early_season_penalty(
+            game_date, home_stats, away_stats
+        )
+        factors.factors_detail["early_season"] = {
+            "penalty": factors.early_season_penalty,
+            "note": "Penalty applied for games before mid-December or teams with few games"
+        }
+
+        # 7. VARIANCE PENALTY (-5 to 0 points)
         # High-variance games reduce confidence in any prediction
         factors.variance_penalty = self._calculate_variance_penalty(
             home_stats, away_stats, bet_type, stat_comparison
@@ -1551,6 +1659,71 @@ class ValueCalculator:
         }
 
         return factors
+
+    def _score_bet_type_strength(self, bet_type: BetType) -> float:
+        """
+        Score based on historical model performance for each bet type (0-5 points).
+
+        Based on actual performance data:
+        - Totals: 54% win rate (profitable) -> +5 points
+        - Spreads: 44% win rate (below breakeven) -> +0 points
+        - Moneyline: 39% win rate (significantly below) -> +0 points
+
+        This helps the model focus on bet types where it has demonstrated edge.
+        """
+        if bet_type == BetType.TOTAL:
+            return 5.0  # Totals are working well
+        elif bet_type == BetType.SPREAD:
+            return 0.0  # Spreads need improvement, no boost
+        else:  # MONEYLINE
+            return 0.0  # ML needs significant improvement, no boost
+
+    def _calculate_early_season_penalty(
+        self,
+        game_date: Optional[datetime],
+        home_stats: Optional[TeamStats],
+        away_stats: Optional[TeamStats]
+    ) -> float:
+        """
+        Calculate penalty for early season games (-5 to 0 points).
+
+        KenPom ratings become more reliable as the season progresses:
+        - Before Dec 1: -5 points (very early, ratings unreliable)
+        - Dec 1-15: -3 points (still early)
+        - Dec 16-31: -1.5 points (ratings improving)
+        - Jan onwards: 0 points (ratings stable)
+
+        Also considers games played if available in team stats.
+        """
+        penalty = 0.0
+
+        # Date-based penalty
+        if game_date:
+            month = game_date.month
+            day = game_date.day
+
+            # Season typically starts in November
+            if month == 11:  # November
+                penalty -= 5.0  # Very early season
+            elif month == 12:
+                if day <= 15:
+                    penalty -= 3.0  # Early December
+                else:
+                    penalty -= 1.5  # Late December
+            elif month == 1 and day <= 10:
+                penalty -= 0.5  # Early January, slight penalty
+            # Feb onwards: no penalty (reliable data)
+
+        # Additional penalty if teams lack experience data (proxy for games played)
+        if home_stats and away_stats:
+            # Low continuity often correlates with early-season roster uncertainty
+            avg_continuity = (
+                (home_stats.continuity or 50) + (away_stats.continuity or 50)
+            ) / 2
+            if avg_continuity < 30:
+                penalty -= 1.0  # New rosters are less predictable
+
+        return max(-5.0, penalty)
 
     def _score_public_betting(
         self,
