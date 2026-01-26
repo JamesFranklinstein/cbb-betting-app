@@ -451,11 +451,23 @@ async def _auto_update_pending_results():
         return 0
 
     # Build scores dict with multiple key formats for matching
+    # Include game date to prevent matching wrong games
     scores = {}
     for game in scores_data:
         if game.get("completed"):
             home_team = game.get("home_team")
             away_team = game.get("away_team")
+
+            # Extract game date from commence_time
+            commence_time = game.get("commence_time", "")
+            game_date = None
+            if commence_time:
+                try:
+                    # Parse ISO format and extract date
+                    game_dt = datetime.fromisoformat(commence_time.replace("Z", "+00:00"))
+                    game_date = game_dt.strftime("%Y-%m-%d")
+                except (ValueError, AttributeError):
+                    pass
 
             home_score = None
             away_score = None
@@ -467,7 +479,7 @@ async def _auto_update_pending_results():
                     away_score = int(score.get("score", 0))
 
             if home_score is not None and away_score is not None:
-                score_data = {"home": home_score, "away": away_score}
+                score_data = {"home": home_score, "away": away_score, "game_date": game_date}
                 # Store with exact team names
                 key = f"{home_team} vs {away_team}"
                 scores[key] = score_data
@@ -494,6 +506,17 @@ async def _auto_update_pending_results():
                 score = _find_matching_score(bet.home_team, bet.away_team, scores)
                 if not score:
                     continue
+
+        # CRITICAL: Validate game date matches bet date to prevent grading wrong games
+        # This prevents matching yesterday's "Penn St vs Ohio St" to today's different game
+        score_game_date = score.get("game_date")
+        if score_game_date and bet.date:
+            if score_game_date != bet.date:
+                logger.warning(
+                    f"Skipping score match for {bet.home_team} vs {bet.away_team}: "
+                    f"score date {score_game_date} != bet date {bet.date}"
+                )
+                continue
 
         # Update the bet with the score
         updated += bet_history_service.update_single_bet_result(
