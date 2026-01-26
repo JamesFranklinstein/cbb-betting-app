@@ -682,11 +682,11 @@ class CLVTracker:
         Returns:
             The created BetRecord
         """
-        bet_id = f"{game_id}_{bet_type}_{side}_{datetime.now().strftime('%Y%m%d%H%M%S')}"
+        bet_id = f"{game_id}_{bet_type}_{side}_{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}"
 
         record = BetRecord(
             bet_id=bet_id,
-            timestamp=datetime.now().isoformat(),
+            timestamp=datetime.now(timezone.utc).isoformat(),
             game_id=game_id,
             home_team=home_team,
             away_team=away_team,
@@ -865,7 +865,7 @@ class CLVTracker:
 
         # Filter by date
         if days:
-            cutoff = datetime.now().timestamp() - (days * 86400)
+            cutoff = datetime.now(timezone.utc).timestamp() - (days * 86400)
             filtered = [
                 r for r in filtered
                 if datetime.fromisoformat(r.timestamp).timestamp() >= cutoff
@@ -933,7 +933,7 @@ class CLVTracker:
         Returns:
             Number of records removed
         """
-        cutoff = datetime.now().timestamp() - (days * 86400)
+        cutoff = datetime.now(timezone.utc).timestamp() - (days * 86400)
         original_count = len(self.records)
         self.records = [
             r for r in self.records

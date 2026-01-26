@@ -57,7 +57,7 @@ class RetrainingScheduler:
             self.job_history.append({
                 'job_id': event.job_id,
                 'status': 'success',
-                'time': datetime.now().isoformat(),
+                'time': datetime.now(timezone.utc).isoformat(),
             })
             logger.info(f"Job executed: {event.job_id}")
 
@@ -66,7 +66,7 @@ class RetrainingScheduler:
                 'job_id': event.job_id,
                 'status': 'error',
                 'error': str(event.exception),
-                'time': datetime.now().isoformat(),
+                'time': datetime.now(timezone.utc).isoformat(),
             })
             logger.error(f"Job error: {event.job_id} - {event.exception}")
 

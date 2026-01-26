@@ -6,7 +6,7 @@ Uses PostgreSQL for persistent storage (works with Vercel Postgres).
 """
 
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import List, Dict, Any, Optional
 from dataclasses import dataclass
 
@@ -17,6 +17,41 @@ from models.connection import SessionLocal
 from models.database import StoredBet as StoredBetModel
 
 logger = logging.getLogger(__name__)
+
+
+def _normalize_team_name(name: str) -> str:
+    """Normalize team name for comparison (handles different formats)."""
+    if not name:
+        return ""
+    name = name.lower().strip()
+    # Normalize common variations
+    name = name.replace(" st.", " state").replace(" st ", " state ")
+    name = name.replace("'", "").replace("'", "")
+    name = name.replace("-", " ")
+    # Remove common suffixes
+    for suffix in [" university", " college"]:
+        name = name.replace(suffix, "")
+    return name.strip()
+
+
+def _teams_match(name1: str, name2: str) -> bool:
+    """Check if two team names refer to the same team."""
+    if not name1 or not name2:
+        return False
+    n1 = _normalize_team_name(name1)
+    n2 = _normalize_team_name(name2)
+    # Exact match after normalization
+    if n1 == n2:
+        return True
+    # One contains the other (handles "North Carolina" vs "north carolina tar heels")
+    if n1 in n2 or n2 in n1:
+        return True
+    # Check if primary words match (handles abbreviated names)
+    words1 = set(w for w in n1.split() if len(w) > 3)
+    words2 = set(w for w in n2.split() if len(w) > 3)
+    if words1 and words2 and words1 & words2:
+        return True
+    return False
 
 
 @dataclass
@@ -134,10 +169,10 @@ class BetHistoryService:
         """
         session = self._get_session()
         try:
-            today = datetime.now().strftime("%Y-%m-%d")
+            today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
             # Generate unique ID
-            bet_id = f"{game_data['home_team']}_{game_data['away_team']}_{bet_data['type']}_{bet_data['side']}_{datetime.now().strftime('%Y%m%d%H%M%S')}"
+            bet_id = f"{game_data['home_team']}_{game_data['away_team']}_{bet_data['type']}_{bet_data['side']}_{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}"
 
             # Check if this exact bet already exists for today
             existing = session.query(StoredBetModel).filter(
@@ -175,7 +210,7 @@ class BetHistoryService:
                 kenpom_total=game_data.get('kenpom_total', 0.0),
                 vegas_spread=game_data.get('vegas_spread', 0.0),
                 vegas_total=game_data.get('vegas_total', 0.0),
-                created_at=datetime.utcnow()
+                created_at=datetime.now(timezone.utc)
             )
 
             session.add(stored_bet)
@@ -274,7 +309,7 @@ class BetHistoryService:
 
                 # Determine result
                 bet.result = self._determine_result(bet)
-                bet.settled_at = datetime.utcnow()
+                bet.settled_at = datetime.now(timezone.utc)
                 updated += 1
 
             session.commit()
@@ -299,6 +334,12 @@ class BetHistoryService:
         Returns:
             1 if updated, 0 if not found or already settled
         """
+        # Validate scores - must be positive integers for a completed game
+        # A score of 0-0 is not valid for basketball
+        if home_score <= 0 or away_score <= 0:
+            logger.warning(f"Invalid scores for bet {bet_id}: {home_score}-{away_score}, skipping")
+            return 0
+
         session = self._get_session()
         try:
             bet = session.query(StoredBetModel).filter(
@@ -316,7 +357,7 @@ class BetHistoryService:
 
             # Determine result
             bet.result = self._determine_result(bet)
-            bet.settled_at = datetime.utcnow()
+            bet.settled_at = datetime.now(timezone.utc)
 
             session.commit()
             return 1
@@ -336,7 +377,11 @@ class BetHistoryService:
         if bet.bet_type == 'spread':
             line = bet.line or 0
 
-            if bet.side == bet.home_team:
+            # Use fuzzy matching for team names to handle different formats
+            # (e.g., "North Carolina" vs "UNC" or "north carolina")
+            is_home_bet = _teams_match(bet.side, bet.home_team)
+
+            if is_home_bet:
                 # Home team spread bet
                 cover_margin = bet.actual_margin + line
             else:
@@ -369,7 +414,10 @@ class BetHistoryService:
                     return 'push'
 
         elif bet.bet_type == 'moneyline':
-            if bet.side == bet.home_team:
+            # Use fuzzy matching for team names
+            is_home_bet = _teams_match(bet.side, bet.home_team)
+
+            if is_home_bet:
                 if bet.actual_margin > 0:
                     return 'win'
                 elif bet.actual_margin < 0:
@@ -410,7 +458,7 @@ class BetHistoryService:
         """Get bets from the last N days."""
         session = self._get_session()
         try:
-            cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+            cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%d")
             return session.query(StoredBetModel).filter(
                 StoredBetModel.date >= cutoff
             ).order_by(StoredBetModel.created_at.desc()).all()
@@ -674,7 +722,7 @@ class BetHistoryService:
         """Remove bets older than specified days."""
         session = self._get_session()
         try:
-            cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+            cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%d")
             result = session.query(StoredBetModel).filter(
                 StoredBetModel.date < cutoff
             ).delete()

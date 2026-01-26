@@ -434,8 +434,8 @@ async def _auto_update_pending_results():
 
     # Check if any pending bets are from games that should be completed
     # (games from yesterday or earlier)
-    from datetime import timedelta
-    today = datetime.now().strftime("%Y-%m-%d")
+    # Use UTC for consistent timezone handling (server may run in different TZ)
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
     has_old_pending = any(bet.date < today for bet in pending)
     if not has_old_pending:
@@ -466,7 +466,8 @@ async def _auto_update_pending_results():
                 elif score.get("name") == away_team:
                     away_score = int(score.get("score", 0))
 
-            if home_score is not None and away_score is not None:
+            # Validate scores - must be positive for a completed basketball game
+            if home_score is not None and away_score is not None and home_score > 0 and away_score > 0:
                 score_data = {"home": home_score, "away": away_score}
                 # Store with exact team names
                 key = f"{home_team} vs {away_team}"
@@ -1454,11 +1455,19 @@ async def fetch_and_update_results():
                     elif score.get("name") == away_team:
                         away_score = int(score.get("score", 0))
 
-                if home_score is not None and away_score is not None:
+                # Validate scores - must be positive for a completed basketball game
+                if home_score is not None and away_score is not None and home_score > 0 and away_score > 0:
                     score_data = {"home": home_score, "away": away_score}
                     key = f"{home_team} vs {away_team}"
                     scores[key] = score_data
                     scores[_normalize_team_key(home_team, away_team)] = score_data
+
+        # Track actual unique games for accurate counting
+        unique_games = set()
+        for key in scores.keys():
+            # Only count exact keys (not normalized) to avoid double counting
+            if " vs " in key and key[0].isupper():  # Exact keys start with capital letter
+                unique_games.add(key)
 
         # Match pending bets to scores using fuzzy matching
         updated = 0
@@ -1485,10 +1494,10 @@ async def fetch_and_update_results():
             )
 
         return {
-            "games_found": len(scores) // 2,  # Divided by 2 since we store twice
+            "games_found": len(unique_games),
             "bets_updated": updated,
             "pending_remaining": len(pending) - updated,
-            "message": f"Found {len(scores)//2} completed games, updated {updated} bets"
+            "message": f"Found {len(unique_games)} completed games, updated {updated} bets"
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

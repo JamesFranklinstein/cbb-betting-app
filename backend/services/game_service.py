@@ -104,19 +104,24 @@ class GameService:
         self._misc_stats_cache: Dict[str, Dict[str, Any]] = {}
         self._archive_cache: Dict[str, Dict[str, Any]] = {}  # Historical ratings for trends
         self._cache_loaded: bool = False
+        self._cache_loading: bool = False  # Prevents concurrent cache loads
 
         # Thread lock for cache access
         self._cache_lock = threading.RLock()
     
     async def _load_team_stats_cache(self) -> None:
         """Load all KenPom data into cache for comprehensive analysis."""
+        # Check if cache is already loaded (quick check without acquiring full lock)
         with self._cache_lock:
             if self._cache_loaded:
                 return
+            # Mark as loading to prevent concurrent loads (use a separate flag)
+            if hasattr(self, '_cache_loading') and self._cache_loading:
+                return
+            self._cache_loading = True
 
         try:
             # Calculate date for historical comparison (14 days ago)
-            from datetime import timedelta
             archive_date = (date.today() - timedelta(days=14)).isoformat()
 
             # Fetch all available KenPom data concurrently
@@ -159,6 +164,10 @@ class GameService:
         except Exception as e:
             # Log but don't fail - stats are optional enhancement
             logger.warning(f"Could not load team stats cache: {e}")
+        finally:
+            # Always reset loading flag
+            with self._cache_lock:
+                self._cache_loading = False
 
     def _get_team_stats(self, team_name: str) -> TeamStats:
         """Get TeamStats for a team from cache with all available KenPom data."""
