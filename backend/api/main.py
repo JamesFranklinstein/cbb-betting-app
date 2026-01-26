@@ -102,6 +102,14 @@ class TeamStatComparisonResponse(BaseModel):
     turnover_edge: str
 
 
+class DataQualityWarningResponse(BaseModel):
+    """Warning about potential data quality issues."""
+    code: str
+    severity: str
+    message: str
+    details: dict = {}
+
+
 class GameAnalysisResponse(BaseModel):
     home_team: str
     away_team: str
@@ -129,6 +137,9 @@ class GameAnalysisResponse(BaseModel):
     # Team statistics comparison
     stat_comparison: Optional[TeamStatComparisonResponse] = None
     major_stat_diffs: List[StatDifferenceResponse] = []
+
+    # Data quality warnings
+    data_warnings: List[DataQualityWarningResponse] = []
 
 
 class TeamRatingResponse(BaseModel):
@@ -256,6 +267,17 @@ async def get_value_bets(
                     "tempo_mismatch": analysis.stat_comparison.tempo_mismatch
                 }
 
+            # Build data warnings list
+            data_warnings = []
+            if analysis.data_warnings:
+                for w in analysis.data_warnings:
+                    data_warnings.append({
+                        "code": w.code,
+                        "severity": w.severity,
+                        "message": w.message,
+                        "details": w.details
+                    })
+
             for vb in value_bets:
                 if bet_type is None or vb.bet_type.value == bet_type:
                     results.append({
@@ -284,7 +306,8 @@ async def get_value_bets(
                             "confidence_factors": vb.confidence_factors
                         },
                         "major_stat_diffs": major_stat_diffs,
-                        "stat_summary": stat_summary
+                        "stat_summary": stat_summary,
+                        "data_warnings": data_warnings
                     })
 
         # Sort by confidence: high first, then medium, then low
@@ -451,11 +474,23 @@ async def _auto_update_pending_results():
         return 0
 
     # Build scores dict with multiple key formats for matching
+    # Include game date to prevent matching wrong games
     scores = {}
     for game in scores_data:
         if game.get("completed"):
             home_team = game.get("home_team")
             away_team = game.get("away_team")
+
+            # Extract game date from commence_time
+            commence_time = game.get("commence_time", "")
+            game_date = None
+            if commence_time:
+                try:
+                    # Parse ISO format and extract date
+                    game_dt = datetime.fromisoformat(commence_time.replace("Z", "+00:00"))
+                    game_date = game_dt.strftime("%Y-%m-%d")
+                except (ValueError, AttributeError):
+                    pass
 
             home_score = None
             away_score = None
@@ -468,7 +503,7 @@ async def _auto_update_pending_results():
 
             # Validate scores - must be positive for a completed basketball game
             if home_score is not None and away_score is not None and home_score > 0 and away_score > 0:
-                score_data = {"home": home_score, "away": away_score}
+                score_data = {"home": home_score, "away": away_score, "game_date": game_date}
                 # Store with exact team names
                 key = f"{home_team} vs {away_team}"
                 scores[key] = score_data
@@ -495,6 +530,17 @@ async def _auto_update_pending_results():
                 score = _find_matching_score(bet.home_team, bet.away_team, scores)
                 if not score:
                     continue
+
+        # CRITICAL: Validate game date matches bet date to prevent grading wrong games
+        # This prevents matching yesterday's "Penn St vs Ohio St" to today's different game
+        score_game_date = score.get("game_date")
+        if score_game_date and bet.date:
+            if score_game_date != bet.date:
+                logger.warning(
+                    f"Skipping score match for {bet.home_team} vs {bet.away_team}: "
+                    f"score date {score_game_date} != bet date {bet.date}"
+                )
+                continue
 
         # Update the bet with the score
         updated += bet_history_service.update_single_bet_result(
@@ -955,8 +1001,8 @@ async def reset_bet_result(bet_id: str):
     try:
         session = SessionLocal()
         try:
-            from models.bet_history import BetRecord
-            bet = session.query(BetRecord).filter(BetRecord.bet_id == bet_id).first()
+            from models.database import StoredBet
+            bet = session.query(StoredBet).filter(StoredBet.bet_id == bet_id).first()
             if not bet:
                 raise HTTPException(status_code=404, detail=f"Bet not found: {bet_id}")
 
@@ -1612,7 +1658,16 @@ def _analysis_to_response(analysis) -> GameAnalysisResponse:
             for vb in analysis.value_bets
         ],
         stat_comparison=stat_comparison_response,
-        major_stat_diffs=major_diffs
+        major_stat_diffs=major_diffs,
+        data_warnings=[
+            DataQualityWarningResponse(
+                code=w.code,
+                severity=w.severity,
+                message=w.message,
+                details=w.details
+            )
+            for w in (analysis.data_warnings or [])
+        ]
     )
 
 

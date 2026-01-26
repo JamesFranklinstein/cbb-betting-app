@@ -39,6 +39,15 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass
+class DataQualityWarning:
+    """Warning about potential data quality issues."""
+    code: str           # Short identifier (e.g., "SPREAD_ML_MISMATCH")
+    severity: str       # "high", "medium", "low"
+    message: str        # Human-readable explanation
+    details: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
 class GameAnalysis:
     """Complete analysis for a single game."""
     # Basic info
@@ -77,6 +86,9 @@ class GameAnalysis:
     # Summary of major differences
     major_stat_diffs: List[StatDifference] = field(default_factory=list)
 
+    # Data quality warnings
+    data_warnings: List[DataQualityWarning] = field(default_factory=list)
+
 
 class GameService:
     """
@@ -108,7 +120,119 @@ class GameService:
 
         # Thread lock for cache access
         self._cache_lock = threading.RLock()
-    
+
+    def _validate_data_quality(
+        self,
+        kenpom_spread: float,
+        kenpom_win_prob: float,
+        vegas_spread: float,
+        ml_home: int,
+        ml_away: int
+    ) -> List[DataQualityWarning]:
+        """
+        Validate that spread and moneyline data are consistent.
+
+        Flags potential data quality issues that could lead to false value signals.
+        """
+        warnings = []
+
+        # Helper to convert American odds to implied probability
+        def odds_to_prob(odds: int) -> float:
+            if odds == 0:
+                return 0.5
+            if odds > 0:
+                return 100 / (odds + 100)
+            return abs(odds) / (abs(odds) + 100)
+
+        # Helper to estimate expected moneyline from spread
+        def spread_to_expected_favorite_prob(spread: float) -> float:
+            """
+            Rough conversion: each point of spread ≈ 3% win probability shift.
+            Spread of -7 ≈ 71% favorite, -14 ≈ 85%, -21 ≈ 92%
+            """
+            if spread == 0:
+                return 0.5
+            # Use logistic-style curve for more accuracy at extremes
+            import math
+            # Coefficient calibrated to: -7 spread ≈ 70%, -14 ≈ 85%
+            return 1 / (1 + math.exp(spread * 0.15))
+
+        # Check 1: Missing Vegas spread but moneyline exists
+        if vegas_spread == 0 and (ml_home != 0 or ml_away != 0):
+            warnings.append(DataQualityWarning(
+                code="MISSING_SPREAD",
+                severity="medium",
+                message="Vegas spread is missing but moneyline exists. Edge calculations may be unreliable.",
+                details={"ml_home": ml_home, "ml_away": ml_away}
+            ))
+
+        # Check 2: Spread and moneyline don't match
+        if ml_home != 0 and ml_away != 0 and vegas_spread != 0:
+            ml_home_prob = odds_to_prob(ml_home)
+            ml_away_prob = odds_to_prob(ml_away)
+
+            # Determine who's favored by spread vs moneyline
+            spread_favorite = "home" if vegas_spread < 0 else "away" if vegas_spread > 0 else "even"
+            ml_favorite = "home" if ml_home_prob > ml_away_prob else "away" if ml_away_prob > ml_home_prob else "even"
+
+            # Major mismatch: spread and ML disagree on favorite
+            if spread_favorite != ml_favorite and spread_favorite != "even" and ml_favorite != "even":
+                warnings.append(DataQualityWarning(
+                    code="SPREAD_ML_FAVORITE_MISMATCH",
+                    severity="high",
+                    message=f"Spread favors {spread_favorite} but moneyline favors {ml_favorite}. Data may be incorrect.",
+                    details={
+                        "vegas_spread": vegas_spread,
+                        "ml_home": ml_home,
+                        "ml_away": ml_away,
+                        "ml_home_prob": round(ml_home_prob * 100, 1),
+                        "ml_away_prob": round(ml_away_prob * 100, 1)
+                    }
+                ))
+
+        # Check 3: KenPom spread vs moneyline extreme mismatch
+        if ml_home != 0 and abs(kenpom_spread) < 10:
+            ml_prob = odds_to_prob(ml_home)
+            expected_prob = spread_to_expected_favorite_prob(kenpom_spread)
+
+            # If KenPom says close game (within 10 pts) but ML implies >80% favorite
+            if abs(ml_prob - 0.5) > 0.30:  # ML implies >80% or <20%
+                actual_prob = ml_prob if kenpom_spread < 0 else (1 - ml_prob)
+                warnings.append(DataQualityWarning(
+                    code="KENPOM_ML_MISMATCH",
+                    severity="high",
+                    message=f"KenPom predicts close game (spread {kenpom_spread:+.1f}) but moneyline implies "
+                            f"{max(ml_prob, 1-ml_prob)*100:.0f}% favorite. High edge may be data error.",
+                    details={
+                        "kenpom_spread": kenpom_spread,
+                        "kenpom_win_prob": round(kenpom_win_prob * 100, 1),
+                        "ml_home": ml_home,
+                        "ml_away": ml_away,
+                        "ml_implied_prob": round(ml_prob * 100, 1)
+                    }
+                ))
+
+        # Check 4: Extreme moneyline with moderate KenPom win probability
+        if ml_home != 0:
+            ml_prob = odds_to_prob(ml_home)
+            prob_diff = abs(kenpom_win_prob - ml_prob)
+
+            # If there's a >40% probability disagreement, flag it
+            if prob_diff > 0.40:
+                warnings.append(DataQualityWarning(
+                    code="EXTREME_PROB_DISAGREEMENT",
+                    severity="high",
+                    message=f"KenPom ({kenpom_win_prob*100:.0f}%) and market ({ml_prob*100:.0f}%) disagree by "
+                            f"{prob_diff*100:.0f}%. Verify game matching is correct.",
+                    details={
+                        "kenpom_prob": round(kenpom_win_prob * 100, 1),
+                        "market_prob": round(ml_prob * 100, 1),
+                        "difference": round(prob_diff * 100, 1)
+                    }
+                ))
+
+        return warnings
+
     async def _load_team_stats_cache(self) -> None:
         """Load all KenPom data into cache for comprehensive analysis."""
         # Check if cache is already loaded (quick check without acquiring full lock)
@@ -666,6 +790,21 @@ class GameService:
         spread_diff = kp_spread - vegas_spread if vegas_spread != 0 else 0.0
         total_diff = kp_total - vegas_total if vegas_total != 0 else 0.0
 
+        # Validate data quality
+        ml_home = market_odds.ml_home or 0
+        ml_away = market_odds.ml_away or 0
+        data_warnings = self._validate_data_quality(
+            kenpom_spread=kp_spread,
+            kenpom_win_prob=home_win_prob,
+            vegas_spread=vegas_spread,
+            ml_home=ml_home,
+            ml_away=ml_away
+        )
+
+        if data_warnings:
+            warning_codes = [w.code for w in data_warnings]
+            logger.warning(f"Data quality issues for {kp_game['Home']} vs {kp_game['Visitor']}: {warning_codes}")
+
         return GameAnalysis(
             home_team=kp_game["Home"],
             away_team=kp_game["Visitor"],
@@ -678,15 +817,16 @@ class GameService:
             kenpom_tempo=kp_game.get("PredTempo", 0),
             vegas_spread=vegas_spread,
             vegas_total=vegas_total,
-            vegas_ml_home=market_odds.ml_home or 0,
-            vegas_ml_away=market_odds.ml_away or 0,
+            vegas_ml_home=ml_home,
+            vegas_ml_away=ml_away,
             spread_diff=spread_diff,
             total_diff=total_diff,
             value_bets=value_bets,
             home_rank=kp_game.get("HomeRank", 0),
             away_rank=kp_game.get("VisitorRank", 0),
             stat_comparison=stat_comparison,
-            major_stat_diffs=stat_comparison.major_differences if stat_comparison else []
+            major_stat_diffs=stat_comparison.major_differences if stat_comparison else [],
+            data_warnings=data_warnings
         )
     
     def _create_analysis_kenpom_only(self, kp_game: Dict[str, Any]) -> GameAnalysis:

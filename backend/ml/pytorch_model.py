@@ -100,23 +100,32 @@ class CBBPredictionNet(nn.Module):
         "d_efg_pct_diff", "d_to_pct_diff", "d_or_pct_diff", "d_ft_rate_diff",
         "sos_diff", "luck_diff", "home_advantage", "rank_diff",
         "home_win_streak", "away_win_streak",
-        # Height features (3) - NEW
+        # Height features (3)
         "height_diff", "effective_height_diff", "height_vs_tempo",
+        # Situational features (12) - NEW
+        "days_of_season", "is_conference_game", "is_same_conference",
+        "home_rest_days", "away_rest_days", "rest_advantage",
+        "home_back_to_back", "away_back_to_back", "travel_distance",
+        "home_conf_strength", "away_conf_strength", "conf_strength_diff",
     ]
 
     def __init__(
         self,
-        n_features: int = 21,
+        n_features: int = 33,  # Updated: 21 original + 12 situational features
         hidden_sizes: Tuple[int, ...] = (64, 128, 64),
         dropout: float = 0.3,
         height_feature_indices: Tuple[int, ...] = (18, 19, 20),
-        height_weight: float = 0.33
+        height_weight: float = 0.33,
+        situational_feature_indices: Tuple[int, ...] = tuple(range(21, 33)),
+        situational_weight: float = 0.5  # Situational features get half weight
     ):
         super().__init__()
 
         self.n_features = n_features
         self.height_feature_indices = height_feature_indices
         self.height_weight = height_weight
+        self.situational_feature_indices = situational_feature_indices
+        self.situational_weight = situational_weight
         self.hidden_sizes = hidden_sizes
 
         # Input normalization
@@ -173,24 +182,37 @@ class CBBPredictionNet(nn.Module):
                 if module.bias is not None:
                     nn.init.zeros_(module.bias)
 
-    def apply_height_weighting(self, x: torch.Tensor) -> torch.Tensor:
+    def apply_feature_weighting(self, x: torch.Tensor) -> torch.Tensor:
         """
-        Apply reduced weighting to height features.
+        Apply reduced weighting to height and situational features.
 
-        This implements the user's requirement for height to have "very little weight"
-        by scaling height features to 1/3 of their normalized values.
+        Height features: 1/3 weight (0.33x) - user requirement
+        Situational features: 1/2 weight (0.5x) - supplementary signals
 
         Args:
             x: Input tensor [batch_size, n_features]
 
         Returns:
-            Tensor with height features scaled down
+            Tensor with appropriate features scaled down
         """
         x = x.clone()
+
+        # Apply height weighting (1/3)
         for idx in self.height_feature_indices:
             if idx < x.shape[1]:
                 x[:, idx] *= self.height_weight
+
+        # Apply situational weighting (1/2)
+        for idx in self.situational_feature_indices:
+            if idx < x.shape[1]:
+                x[:, idx] *= self.situational_weight
+
         return x
+
+    # Keep old method name for backwards compatibility
+    def apply_height_weighting(self, x: torch.Tensor) -> torch.Tensor:
+        """Backwards compatible alias for apply_feature_weighting."""
+        return self.apply_feature_weighting(x)
 
     def forward(
         self,
@@ -211,8 +233,8 @@ class CBBPredictionNet(nn.Module):
                 - 'total': Predicted total [batch_size]
                 - 'win_logits': Raw logits before calibration [batch_size]
         """
-        # Apply height weighting
-        x = self.apply_height_weighting(x)
+        # Apply feature weighting (height and situational)
+        x = self.apply_feature_weighting(x)
 
         # Input processing
         x = self.input_bn(x)

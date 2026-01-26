@@ -50,8 +50,21 @@ class CBBModelTrainer:
         "d_efg_pct_diff", "d_to_pct_diff", "d_or_pct_diff", "d_ft_rate_diff",
         "sos_diff", "luck_diff", "home_advantage", "rank_diff",
         "home_win_streak", "away_win_streak",
-        # Height features (3) - NEW
+        # Height features (3)
         "height_diff", "effective_height_diff", "height_vs_tempo",
+        # NEW: Situational features (12)
+        "days_of_season",           # Time of season (0-1, higher = later)
+        "is_conference_game",       # Binary: conference game indicator
+        "is_same_conference",       # Binary: teams in same conference
+        "home_rest_days",           # Normalized rest days (0-1)
+        "away_rest_days",           # Normalized rest days (0-1)
+        "rest_advantage",           # Home rest advantage (-1 to 1)
+        "home_back_to_back",        # Binary: home on back-to-back
+        "away_back_to_back",        # Binary: away on back-to-back
+        "travel_distance",          # Normalized travel distance
+        "home_conf_strength",       # Home conference strength
+        "away_conf_strength",       # Away conference strength
+        "conf_strength_diff",       # Conference strength differential
     ]
 
     def __init__(
@@ -348,20 +361,72 @@ class CBBModelTrainer:
         logloss = log_loss(y_win, win_prob_clipped)
         accuracy = accuracy_score(y_win, (win_prob > 0.5).astype(int))
 
+        # NEW: Calculate Expected Calibration Error (ECE)
+        ece = self._calculate_ece(win_prob, y_win, n_bins=10)
+
         spread_mae = np.mean(np.abs(spread_pred - y_spread))
         total_mae = np.mean(np.abs(total_pred - y_total))
 
         # Combined loss for early stopping (weight win prob higher)
-        combined_loss = 2 * brier + spread_mae / 10 + total_mae / 10
+        # NEW: Include ECE in combined loss for better calibration
+        combined_loss = 2 * brier + 0.5 * ece + spread_mae / 10 + total_mae / 10
 
         return {
             'brier_score': float(brier),
             'log_loss': float(logloss),
             'accuracy': float(accuracy),
+            'ece': float(ece),  # NEW: Expected Calibration Error
             'spread_mae': float(spread_mae),
             'total_mae': float(total_mae),
             'combined_loss': float(combined_loss),
         }
+
+    def _calculate_ece(
+        self,
+        probs: np.ndarray,
+        labels: np.ndarray,
+        n_bins: int = 10
+    ) -> float:
+        """
+        Calculate Expected Calibration Error (ECE).
+
+        ECE measures how well-calibrated probability predictions are.
+        A perfectly calibrated model would have ECE = 0.
+
+        For betting, good calibration is critical - we need our 60% confidence
+        predictions to actually win 60% of the time.
+
+        Formula: ECE = sum_i (n_i / N) * |acc_i - conf_i|
+        where acc_i is accuracy in bin i and conf_i is average confidence in bin i
+
+        Args:
+            probs: Predicted probabilities
+            labels: True binary labels
+            n_bins: Number of calibration bins
+
+        Returns:
+            ECE value (lower is better, 0 = perfect calibration)
+        """
+        bin_boundaries = np.linspace(0, 1, n_bins + 1)
+        ece = 0.0
+        total_samples = len(probs)
+
+        for i in range(n_bins):
+            # Find samples in this probability bin
+            in_bin = (probs >= bin_boundaries[i]) & (probs < bin_boundaries[i + 1])
+            if i == n_bins - 1:  # Include right edge in last bin
+                in_bin = (probs >= bin_boundaries[i]) & (probs <= bin_boundaries[i + 1])
+
+            n_in_bin = in_bin.sum()
+            if n_in_bin > 0:
+                # Average predicted probability in bin
+                avg_confidence = probs[in_bin].mean()
+                # Actual accuracy in bin
+                avg_accuracy = labels[in_bin].mean()
+                # Weighted contribution to ECE
+                ece += (n_in_bin / total_samples) * abs(avg_accuracy - avg_confidence)
+
+        return ece
 
     def calibrate_temperature(
         self,
