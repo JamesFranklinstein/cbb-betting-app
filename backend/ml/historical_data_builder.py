@@ -361,15 +361,32 @@ async def build_training_data_from_bets() -> Dict[str, Any]:
                 "samples": 0
             }
 
+        # Convert DataFrame to records with native Python types
+        import numpy as np
+
+        def convert_value(v):
+            if isinstance(v, (np.integer, np.floating)):
+                return float(v)
+            elif isinstance(v, np.ndarray):
+                return v.tolist()
+            elif isinstance(v, (np.bool_,)):
+                return bool(v)
+            return v
+
+        records = []
+        for _, row in df.iterrows():
+            record = {k: convert_value(v) for k, v in row.to_dict().items()}
+            records.append(record)
+
         return {
             "status": "success",
             "samples": len(df),
             "date_range": {
-                "start": df["game_date"].min(),
-                "end": df["game_date"].max()
+                "start": str(df["game_date"].min()),
+                "end": str(df["game_date"].max())
             },
             "columns": list(df.columns),
-            "data": df.to_dict(orient="records")
+            "data": records
         }
 
     except Exception as e:

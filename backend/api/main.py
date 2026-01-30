@@ -195,7 +195,7 @@ bet_history_service = BetHistoryService()
 
 # ==================== ENDPOINTS ====================
 
-CODE_VERSION = "2.4-jsonresponse"
+CODE_VERSION = "2.5-datafix"
 
 @app.get("/health", response_model=HealthResponse)
 async def health_check():
