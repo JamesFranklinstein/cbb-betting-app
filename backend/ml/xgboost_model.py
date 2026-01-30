@@ -159,7 +159,7 @@ class XGBoostPredictor:
         if not HAS_XGBOOST:
             raise ImportError("XGBoost is required. Install with: pip install xgboost")
 
-        logger.info(f"Training XGBoost models on {len(train_df)} samples")
+        logger.info(f"[XGBOOST_V2] Training XGBoost models on {len(train_df)} samples")
 
         # Split if no validation set provided
         if val_df is None:
