@@ -195,7 +195,7 @@ bet_history_service = BetHistoryService()
 
 # ==================== ENDPOINTS ====================
 
-CODE_VERSION = "2.5-datafix"
+CODE_VERSION = "2.6-debug"
 
 @app.get("/health", response_model=HealthResponse)
 async def health_check():
@@ -1746,11 +1746,28 @@ async def train_model_from_stored_bets():
                     return float(obj)
                 if isinstance(obj, np.ndarray):
                     return obj.tolist()
+                if hasattr(obj, 'item'):  # scalar numpy types
+                    return obj.item()
                 return super().default(obj)
 
-        return JSONResponse(
-            content=json.loads(json.dumps(response, cls=NumpyEncoder))
-        )
+        try:
+            json_str = json.dumps(response, cls=NumpyEncoder)
+            return JSONResponse(content=json.loads(json_str))
+        except TypeError as e:
+            # Find the problematic type
+            import traceback
+            logger.error(f"JSON serialization error: {e}")
+            logger.error(f"Traceback: {traceback.format_exc()}")
+
+            # Try to identify problematic fields
+            for key, value in response.items():
+                try:
+                    json.dumps({key: value}, cls=NumpyEncoder)
+                except TypeError as field_err:
+                    logger.error(f"Field '{key}' failed serialization: {field_err}, type: {type(value)}")
+
+            # Return a simple success message
+            return {"status": "success", "message": "Training completed but response serialization failed", "model_version": f"xgboost_v{version_str}"}
 
     except Exception as e:
         logger.error(f"Error training model from bets: {e}")
