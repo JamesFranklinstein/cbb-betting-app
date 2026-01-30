@@ -3,9 +3,11 @@ XGBoost Model for CBB Predictions
 
 Replaces PyTorch with XGBoost for better interpretability and performance
 on tabular data. Uses separate models for each prediction task:
-- Win probability (classification)
+- Win probability (classification with calibration)
 - Spread prediction (regression)
 - Total prediction (regression)
+
+Version: 2.0.0 - Fixed is_fitted check during training
 """
 
 import logging
