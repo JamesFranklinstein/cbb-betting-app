@@ -205,6 +205,9 @@ class XGBoostPredictor:
             )
             self.calibrated_win_model.fit(X_val_scaled, y_val_win)
 
+        # Set is_fitted before evaluation so predict methods work
+        self.is_fitted = True
+
         # Evaluate win model
         win_probs = self.predict_win_prob(X_val_scaled, already_scaled=True)
         metrics["win"] = {
@@ -264,8 +267,6 @@ class XGBoostPredictor:
             "metrics": metrics,
             "model_type": "xgboost",
         }
-
-        self.is_fitted = True
 
         return metrics
 
