@@ -1704,14 +1704,27 @@ async def train_model_from_stored_bets():
         version_str = datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')
         model_path = predictor.save(version_str)
 
+        # Convert numpy types to Python native types for JSON serialization
+        def convert_to_native(obj):
+            import numpy as np
+            if isinstance(obj, dict):
+                return {k: convert_to_native(v) for k, v in obj.items()}
+            elif isinstance(obj, (list, tuple)):
+                return [convert_to_native(v) for v in obj]
+            elif isinstance(obj, (np.integer, np.floating)):
+                return float(obj)
+            elif isinstance(obj, np.ndarray):
+                return obj.tolist()
+            return obj
+
         return {
             "status": "success",
-            "samples_collected": len(df),
-            "training_samples": len(train_df),
-            "validation_samples": len(val_df),
+            "samples_collected": int(len(df)),
+            "training_samples": int(len(train_df)),
+            "validation_samples": int(len(val_df)),
             "model_version": f"xgboost_v{version_str}",
             "model_path": model_path,
-            "metrics": metrics,
+            "metrics": convert_to_native(metrics),
             "date_range": result.get("date_range")
         }
 
