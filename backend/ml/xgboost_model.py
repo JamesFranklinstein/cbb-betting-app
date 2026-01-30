@@ -209,8 +209,10 @@ class XGBoostPredictor:
 
         # Set is_fitted before evaluation so predict methods work
         self.is_fitted = True
+        logger.info(f"Set is_fitted = {self.is_fitted}")
 
         # Evaluate win model
+        logger.info("Evaluating win model...")
         win_probs = self.predict_win_prob(X_val_scaled, already_scaled=True)
         metrics["win"] = {
             "accuracy": accuracy_score(y_val_win, (win_probs > 0.5).astype(int)),

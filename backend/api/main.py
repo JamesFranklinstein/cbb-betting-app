@@ -1658,11 +1658,13 @@ async def train_model_from_stored_bets():
     This is the preferred method as it uses actual graded bet outcomes.
     """
     try:
+        logger.info("Starting train-from-bets endpoint")
         from ml.historical_data_builder import build_training_data_from_bets
         from ml.xgboost_model import XGBoostPredictor, FEATURE_COLUMNS
         import pandas as pd
 
         # Build training data from stored bets
+        logger.info("Building training data from stored bets...")
         result = await build_training_data_from_bets()
 
         if result["status"] != "success":
@@ -1692,8 +1694,11 @@ async def train_model_from_stored_bets():
         logger.info(f"Training XGBoost on {len(train_df)} games, validating on {len(val_df)} games")
 
         # Train XGBoost model
+        logger.info("Creating XGBoostPredictor...")
         predictor = XGBoostPredictor(model_dir="./ml_models")
+        logger.info("Starting model training...")
         metrics = predictor.train(train_df, val_df)
+        logger.info(f"Training complete. Metrics: {metrics}")
 
         # Save model
         version_str = datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')
