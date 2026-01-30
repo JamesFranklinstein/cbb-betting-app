@@ -417,13 +417,14 @@ class BetHistoryService:
         finally:
             session.close()
 
-    def get_all_bets(self) -> List[StoredBetModel]:
-        """Get all bets."""
+    def get_all_bets(self, start_date: str = None) -> List[StoredBetModel]:
+        """Get all bets, optionally filtered from a start date."""
         session = self._get_session()
         try:
-            return session.query(StoredBetModel).order_by(
-                StoredBetModel.created_at.desc()
-            ).all()
+            query = session.query(StoredBetModel)
+            if start_date:
+                query = query.filter(StoredBetModel.date >= start_date)
+            return query.order_by(StoredBetModel.created_at.desc()).all()
         finally:
             session.close()
 
@@ -483,9 +484,9 @@ class BetHistoryService:
 
         return summary
 
-    def get_overall_stats(self) -> OverallStats:
-        """Calculate overall betting statistics."""
-        bets = self.get_all_bets()
+    def get_overall_stats(self, start_date: str = None) -> OverallStats:
+        """Calculate overall betting statistics, optionally from a start date."""
+        bets = self.get_all_bets(start_date=start_date)
 
         stats = OverallStats()
         stats.total_bets = len(bets)

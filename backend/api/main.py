@@ -675,11 +675,17 @@ async def get_bet_history(
 
 
 @app.get("/api/bet-history/stats")
-async def get_betting_stats():
+async def get_betting_stats(
+    start_date: str = Query(None, description="Start date filter (YYYY-MM-DD). Defaults to today.")
+):
     """Get overall betting statistics and performance."""
     try:
-        stats = bet_history_service.get_overall_stats()
+        # Default to today's date to show fresh stats
+        if start_date is None:
+            start_date = datetime.now().strftime("%Y-%m-%d")
+        stats = bet_history_service.get_overall_stats(start_date=start_date)
         return {
+            "start_date": start_date,
             "total_bets": stats.total_bets,
             "total_wins": stats.total_wins,
             "total_losses": stats.total_losses,
@@ -1232,10 +1238,10 @@ async def compare_ml_versions(
 async def trigger_ml_retraining(
     min_samples: int = Query(100, description="Minimum training samples required")
 ):
-    """Trigger manual ML model retraining."""
+    """Trigger manual ML model retraining using XGBoost."""
     try:
         from ml.feedback_collector import FeedbackCollector
-        from ml.trainer import CBBModelTrainer
+        from ml.xgboost_model import XGBoostPredictor
         from ml.version_manager import ModelVersionManager
 
         session = SessionLocal()
@@ -1258,51 +1264,57 @@ async def trigger_ml_retraining(
             train_df = df.iloc[:split_idx]
             val_df = df.iloc[split_idx:]
 
-            logger.info(f"Training on {len(train_df)} games, validating on {len(val_df)} games")
+            logger.info(f"Training XGBoost on {len(train_df)} games, validating on {len(val_df)} games")
 
-            # Train new model
-            trainer = CBBModelTrainer(model_dir="./models")
-            metrics = trainer.train(
+            # Train new XGBoost model
+            predictor = XGBoostPredictor(model_dir="./models")
+            metrics = predictor.train(
                 train_df=train_df,
                 val_df=val_df,
-                epochs=100,
-                patience=15
+                calibrate=True
             )
 
-            # Calibrate temperature
-            trainer.calibrate_temperature(val_df)
-
             # Save and register version
-            version_str = f"v{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}_pytorch"
-            model_path = trainer.save_model(version_str)
+            version_str = datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')
+            model_path = predictor.save(version_str)
 
             version_manager = ModelVersionManager("./models", session)
             version = version_manager.create_version(
-                model_type='PyTorch',
-                features=trainer.FEATURE_COLUMNS,
+                model_type='XGBoost',
+                features=predictor.metadata.get('feature_columns', []),
                 hyperparameters={
-                    'hidden_sizes': (64, 128, 64),
-                    'dropout': 0.3,
-                    'height_weight': trainer.height_weight,
+                    'n_estimators': 200,
+                    'max_depth': 6,
+                    'learning_rate': 0.05,
+                    'subsample': 0.8,
+                    'colsample_bytree': 0.8,
                 },
-                training_metrics=metrics,
+                training_metrics={
+                    'accuracy': metrics['win']['accuracy'],
+                    'brier_score': metrics['win']['brier_score'],
+                    'log_loss': metrics['win']['log_loss'],
+                    'spread_mae': metrics['spread']['mae'],
+                    'total_mae': metrics['total']['mae'],
+                },
                 model_path=model_path
             )
 
             # Check if new model is better and activate if so
             active_version = version_manager.get_active_version()
             activated = False
+            new_brier = metrics['win']['brier_score']
             if active_version:
-                if metrics['brier_score'] < (active_version.brier_score or 1.0) - 0.005:
-                    version_manager.activate_version(version_str)
+                old_brier = active_version.brier_score or 1.0
+                if new_brier < old_brier - 0.005:
+                    version_manager.activate_version(f"xgboost_v{version_str}")
                     activated = True
             else:
-                version_manager.activate_version(version_str)
+                version_manager.activate_version(f"xgboost_v{version_str}")
                 activated = True
 
             return {
                 "status": "success",
-                "version": version_str,
+                "version": f"xgboost_v{version_str}",
                 "activated": activated,
                 "metrics": metrics,
                 "training_samples": len(train_df),
@@ -1311,7 +1323,7 @@ async def trigger_ml_retraining(
         finally:
             session.close()
     except Exception as e:
-        logger.error(f"Error during ML retraining: {e}")
+        logger.error(f"Error during XGBoost retraining: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 

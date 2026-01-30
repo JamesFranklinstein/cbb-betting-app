@@ -22,7 +22,7 @@ class RetrainingScheduler:
 
     Schedules:
     - Daily feedback collection (11:59 PM)
-    - Weekly model retraining (Sunday 2:00 AM)
+    - Daily model retraining (3:00 AM)
 
     Uses APScheduler for reliable background job execution.
     """
@@ -106,33 +106,31 @@ class RetrainingScheduler:
         )
         logger.info(f"Scheduled daily feedback collection at {hour:02d}:{minute:02d}")
 
-    def schedule_weekly_retraining(
+    def schedule_daily_retraining(
         self,
-        day_of_week: str = 'sun',
-        hour: int = 2,
+        hour: int = 3,
         minute: int = 0
     ):
         """
-        Schedule weekly model retraining.
+        Schedule daily model retraining.
 
         Args:
-            day_of_week: Day to run ('mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun')
-            hour: Hour to run (0-23)
+            hour: Hour to run (0-23), default 3am
             minute: Minute to run (0-59)
         """
         self.scheduler.add_job(
             self._run_retraining,
-            CronTrigger(day_of_week=day_of_week, hour=hour, minute=minute),
-            id='weekly_retraining',
+            CronTrigger(hour=hour, minute=minute),
+            id='daily_retraining',
             replace_existing=True,
-            name='Weekly Model Retraining'
+            name='Daily XGBoost Model Retraining'
         )
-        logger.info(f"Scheduled weekly retraining on {day_of_week} at {hour:02d}:{minute:02d}")
+        logger.info(f"Scheduled daily XGBoost retraining at {hour:02d}:{minute:02d}")
 
     def schedule_all(self):
         """Schedule all default jobs."""
         self.schedule_feedback_collection()
-        self.schedule_weekly_retraining()
+        self.schedule_daily_retraining()
 
     def _run_feedback_collection(self):
         """Execute feedback collection job."""
@@ -155,13 +153,13 @@ class RetrainingScheduler:
             session.close()
 
     def _run_retraining(self):
-        """Execute model retraining job."""
-        logger.info("Starting scheduled model retraining")
+        """Execute XGBoost model retraining job."""
+        logger.info("Starting scheduled XGBoost model retraining")
 
         session = self.db_session_factory()
         try:
             from .feedback_collector import FeedbackCollector
-            from .trainer import CBBModelTrainer
+            from .xgboost_model import XGBoostPredictor
             from .version_manager import ModelVersionManager
             import pandas as pd
 
@@ -181,57 +179,63 @@ class RetrainingScheduler:
 
             logger.info(f"Training on {len(train_df)} games, validating on {len(val_df)} games")
 
-            # Train new model
-            trainer = CBBModelTrainer(model_dir=self.model_dir)
-            metrics = trainer.train(
+            # Train new XGBoost model
+            predictor = XGBoostPredictor(model_dir=self.model_dir)
+            metrics = predictor.train(
                 train_df=train_df,
                 val_df=val_df,
-                epochs=100,
-                patience=15
+                calibrate=True
             )
 
-            # Calibrate
-            trainer.calibrate_temperature(val_df)
-
             # Save and register version
-            version_str = f"v{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}_pytorch"
-            model_path = trainer.save_model(version_str)
+            version_str = datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')
+            model_path = predictor.save(version_str)
 
             version_manager = ModelVersionManager(self.model_dir, session)
             version = version_manager.create_version(
-                model_type='PyTorch',
-                features=trainer.FEATURE_COLUMNS,
+                model_type='XGBoost',
+                features=predictor.metadata.get('feature_columns', []),
                 hyperparameters={
-                    'hidden_sizes': (64, 128, 64),
-                    'dropout': 0.3,
-                    'height_weight': trainer.height_weight,
+                    'n_estimators': 200,
+                    'max_depth': 6,
+                    'learning_rate': 0.05,
+                    'subsample': 0.8,
+                    'colsample_bytree': 0.8,
                 },
-                training_metrics=metrics,
+                training_metrics={
+                    'accuracy': metrics['win']['accuracy'],
+                    'brier_score': metrics['win']['brier_score'],
+                    'log_loss': metrics['win']['log_loss'],
+                    'spread_mae': metrics['spread']['mae'],
+                    'total_mae': metrics['total']['mae'],
+                },
                 model_path=model_path
             )
 
             # Check if new model is better than current active
             active_version = version_manager.get_active_version()
             if active_version:
-                if metrics['brier_score'] < (active_version.brier_score or 1.0) - 0.005:
-                    version_manager.activate_version(version_str)
-                    logger.info(f"Activated new model {version_str} (better Brier score)")
+                new_brier = metrics['win']['brier_score']
+                old_brier = active_version.brier_score or 1.0
+                if new_brier < old_brier - 0.005:
+                    version_manager.activate_version(f"xgboost_v{version_str}")
+                    logger.info(f"Activated new XGBoost model xgboost_v{version_str} (better Brier score: {new_brier:.4f} vs {old_brier:.4f})")
                 else:
-                    logger.info(f"Kept current model (new Brier score not significantly better)")
+                    logger.info(f"Kept current model (new Brier score {new_brier:.4f} not significantly better than {old_brier:.4f})")
             else:
-                version_manager.activate_version(version_str)
-                logger.info(f"Activated new model {version_str} (no previous active)")
+                version_manager.activate_version(f"xgboost_v{version_str}")
+                logger.info(f"Activated new XGBoost model xgboost_v{version_str} (no previous active)")
 
             return {
                 'status': 'success',
-                'version': version_str,
+                'version': f"xgboost_v{version_str}",
                 'metrics': metrics,
                 'training_games': len(train_df),
                 'validation_games': len(val_df),
             }
 
         except Exception as e:
-            logger.error(f"Model retraining failed: {e}")
+            logger.error(f"XGBoost model retraining failed: {e}")
             raise
         finally:
             session.close()

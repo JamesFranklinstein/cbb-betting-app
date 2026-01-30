@@ -22,9 +22,8 @@ numpy==1.26.3
 scikit-learn==1.4.0
 joblib==1.3.2
 
-# Deep Learning (PyTorch)
-torch>=2.1.0
-torchmetrics>=1.2.0
+# XGBoost for ML predictions
+xgboost>=2.0.3
 
 # Scheduling (for automated retraining)
 apscheduler>=3.10.4
