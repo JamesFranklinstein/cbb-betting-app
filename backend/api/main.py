@@ -195,7 +195,7 @@ bet_history_service = BetHistoryService()
 
 # ==================== ENDPOINTS ====================
 
-CODE_VERSION = "2.6-debug"
+CODE_VERSION = "2.7-earlyreturn"
 
 @app.get("/health", response_model=HealthResponse)
 async def health_check():
@@ -1701,11 +1701,24 @@ async def train_model_from_stored_bets():
         predictor = XGBoostPredictor(model_dir="./ml_models")
         logger.info("Starting model training...")
         metrics = predictor.train(train_df, val_df)
-        logger.info(f"Training complete. Metrics: {metrics}")
+        logger.info(f"Training complete")
 
         # Save model
         version_str = datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')
         model_path = predictor.save(version_str)
+
+        # Return early with simple response to test if training works
+        return {
+            "status": "success",
+            "message": "XGBoost model trained and saved successfully",
+            "model_version": f"xgboost_v{version_str}",
+            "training_samples": int(len(train_df)),
+            "validation_samples": int(len(val_df)),
+            "model_path": model_path,
+            "win_accuracy": round(float(metrics["win"]["accuracy"]), 4),
+            "spread_mae": round(float(metrics["spread"]["mae"]), 2),
+            "total_mae": round(float(metrics["total"]["mae"]), 2)
+        }
 
         # Convert numpy types to Python native types for JSON serialization
         import json
