@@ -195,7 +195,7 @@ bet_history_service = BetHistoryService()
 
 # ==================== ENDPOINTS ====================
 
-CODE_VERSION = "2.8-verifytraining"
+CODE_VERSION = "3.0-final"
 
 @app.get("/health", response_model=HealthResponse)
 async def health_check():
@@ -1703,82 +1703,41 @@ async def train_model_from_stored_bets():
         metrics = predictor.train(train_df, val_df)
         logger.info(f"Training complete")
 
-        # Return early BEFORE saving to verify training works
-        return {
-            "status": "success_before_save",
-            "message": "XGBoost model trained successfully (save skipped for testing)",
-            "training_samples": int(len(train_df)),
-            "validation_samples": int(len(val_df)),
-            "win_accuracy": str(metrics["win"]["accuracy"]),
-            "spread_mae": str(metrics["spread"]["mae"]),
-            "total_mae": str(metrics["total"]["mae"])
-        }
-
-        # This code won't run - for reference only
+        # Save model
         version_str = datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')
         model_path = predictor.save(version_str)
+        logger.info(f"Model saved to {model_path}")
 
-        # Convert numpy types to Python native types for JSON serialization
-        import json
-
-        def convert_to_native(obj):
-            import numpy as np
-            if isinstance(obj, dict):
-                return {k: convert_to_native(v) for k, v in obj.items()}
-            elif isinstance(obj, (list, tuple)):
-                return [convert_to_native(v) for v in obj]
-            elif isinstance(obj, (np.integer, np.floating)):
-                return float(obj)
-            elif isinstance(obj, np.ndarray):
-                return obj.tolist()
-            return obj
-
-        metrics_clean = convert_to_native(metrics)
-        date_range_clean = convert_to_native(result.get("date_range"))
-
-        response = {
+        # Return response with string-converted metrics to avoid JSON serialization issues
+        return {
             "status": "success",
-            "samples_collected": int(len(df)),
-            "training_samples": int(len(train_df)),
-            "validation_samples": int(len(val_df)),
+            "message": "XGBoost model trained and saved successfully",
             "model_version": f"xgboost_v{version_str}",
             "model_path": model_path,
-            "metrics": metrics_clean,
-            "date_range": date_range_clean
+            "training_samples": int(len(train_df)),
+            "validation_samples": int(len(val_df)),
+            "metrics": {
+                "win": {
+                    "accuracy": str(metrics["win"]["accuracy"]),
+                    "brier_score": str(metrics["win"]["brier_score"]),
+                    "log_loss": str(metrics["win"]["log_loss"])
+                },
+                "spread": {
+                    "rmse": str(metrics["spread"]["rmse"]),
+                    "mae": str(metrics["spread"]["mae"]),
+                    "r2": str(metrics["spread"]["r2"])
+                },
+                "total": {
+                    "rmse": str(metrics["total"]["rmse"]),
+                    "mae": str(metrics["total"]["mae"]),
+                    "r2": str(metrics["total"]["r2"])
+                }
+            },
+            "date_range": {
+                "start": str(result.get("date_range", {}).get("start", "")),
+                "end": str(result.get("date_range", {}).get("end", ""))
+            }
         }
-
-        # Use JSONResponse to ensure proper serialization
-        from fastapi.responses import JSONResponse
-
-        class NumpyEncoder(json.JSONEncoder):
-            def default(self, obj):
-                import numpy as np
-                if isinstance(obj, (np.integer, np.floating)):
-                    return float(obj)
-                if isinstance(obj, np.ndarray):
-                    return obj.tolist()
-                if hasattr(obj, 'item'):  # scalar numpy types
-                    return obj.item()
-                return super().default(obj)
-
-        try:
-            json_str = json.dumps(response, cls=NumpyEncoder)
-            return JSONResponse(content=json.loads(json_str))
-        except TypeError as e:
-            # Find the problematic type
-            import traceback
-            logger.error(f"JSON serialization error: {e}")
-            logger.error(f"Traceback: {traceback.format_exc()}")
-
-            # Try to identify problematic fields
-            for key, value in response.items():
-                try:
-                    json.dumps({key: value}, cls=NumpyEncoder)
-                except TypeError as field_err:
-                    logger.error(f"Field '{key}' failed serialization: {field_err}, type: {type(value)}")
-
-            # Return a simple success message
-            return {"status": "success", "message": "Training completed but response serialization failed", "model_version": f"xgboost_v{version_str}"}
 
     except Exception as e:
         logger.error(f"Error training model from bets: {e}")
