@@ -195,7 +195,7 @@ bet_history_service = BetHistoryService()
 
 # ==================== ENDPOINTS ====================
 
-CODE_VERSION = "3.0-final"
+CODE_VERSION = "3.1-metadatafix"
 
 @app.get("/health", response_model=HealthResponse)
 async def health_check():

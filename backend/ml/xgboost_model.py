@@ -262,13 +262,25 @@ class XGBoostPredictor:
         logger.info(f"Total model - RMSE: {metrics['total']['rmse']:.2f}, "
                    f"MAE: {metrics['total']['mae']:.2f}")
 
+        # Convert metrics to native Python types for JSON serialization
+        def to_native(obj):
+            if isinstance(obj, dict):
+                return {k: to_native(v) for k, v in obj.items()}
+            elif isinstance(obj, (np.integer, np.floating)):
+                return float(obj)
+            elif isinstance(obj, np.ndarray):
+                return obj.tolist()
+            return obj
+
+        metrics_native = to_native(metrics)
+
         # Store metadata
         self.metadata = {
             "trained_at": datetime.now().isoformat(),
-            "train_samples": len(train_df),
-            "val_samples": len(val_df),
+            "train_samples": int(len(train_df)),
+            "val_samples": int(len(val_df)),
             "feature_columns": FEATURE_COLUMNS,
-            "metrics": metrics,
+            "metrics": metrics_native,
             "model_type": "xgboost",
         }
 
