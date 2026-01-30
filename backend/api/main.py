@@ -425,6 +425,10 @@ async def _auto_update_pending_results():
     """
     Automatically fetch scores and update pending bet results.
     Called when fetching bet history to keep results current.
+
+    IMPORTANT: Only matches scores to bets when the game date matches.
+    This prevents matching today's pending bets to yesterday's completed games
+    with the same teams.
     """
     # Get pending bets
     pending = bet_history_service.get_pending_bets()
@@ -451,11 +455,23 @@ async def _auto_update_pending_results():
         return 0
 
     # Build scores dict with multiple key formats for matching
+    # KEY CHANGE: Include game date in the dictionary to validate matches
     scores = {}
     for game in scores_data:
         if game.get("completed"):
             home_team = game.get("home_team")
             away_team = game.get("away_team")
+
+            # Extract the game date from commence_time
+            commence_time = game.get("commence_time", "")
+            game_date = None
+            if commence_time:
+                try:
+                    # Parse ISO format datetime and extract date
+                    game_dt = datetime.fromisoformat(commence_time.replace("Z", "+00:00"))
+                    game_date = game_dt.strftime("%Y-%m-%d")
+                except (ValueError, TypeError):
+                    logger.warning(f"Could not parse commence_time: {commence_time}")
 
             home_score = None
             away_score = None
@@ -467,7 +483,7 @@ async def _auto_update_pending_results():
                     away_score = int(score.get("score", 0))
 
             if home_score is not None and away_score is not None:
-                score_data = {"home": home_score, "away": away_score}
+                score_data = {"home": home_score, "away": away_score, "game_date": game_date}
                 # Store with exact team names
                 key = f"{home_team} vs {away_team}"
                 scores[key] = score_data
@@ -479,6 +495,8 @@ async def _auto_update_pending_results():
     for bet in pending:
         if bet.result is not None:
             continue
+
+        score = None
 
         # Try exact match first
         game_key = f"{bet.home_team} vs {bet.away_team}"
@@ -492,8 +510,17 @@ async def _auto_update_pending_results():
             else:
                 # Try to find a fuzzy match
                 score = _find_matching_score(bet.home_team, bet.away_team, scores)
-                if not score:
-                    continue
+
+        if not score:
+            continue
+
+        # CRITICAL: Validate that the game date matches the bet date
+        # This prevents matching today's pending bets to yesterday's completed games
+        score_game_date = score.get("game_date")
+        if score_game_date and score_game_date != bet.date:
+            logger.debug(f"Skipping score match - date mismatch: bet date={bet.date}, game date={score_game_date} "
+                        f"for {bet.home_team} vs {bet.away_team}")
+            continue
 
         # Update the bet with the score
         updated += bet_history_service.update_single_bet_result(
@@ -883,7 +910,10 @@ async def debug_all_bet_dates():
 
 @app.get("/api/bet-history/debug/match-test")
 async def debug_match_test():
-    """Debug endpoint to test team name matching between pending bets and Odds API scores."""
+    """Debug endpoint to test team name matching between pending bets and Odds API scores.
+
+    Now includes game date validation to show when matches would be skipped due to date mismatch.
+    """
     try:
         pending = bet_history_service.get_pending_bets()
         if not pending:
@@ -892,14 +922,25 @@ async def debug_match_test():
         odds_client = OddsAPIClient()
         scores_data = await odds_client.get_scores(days_from=3)
 
-        # Build scores dict
+        # Build scores dict with game dates
         scores = {}
         raw_games = []
         for game in scores_data:
             if game.get("completed"):
                 home_team = game.get("home_team")
                 away_team = game.get("away_team")
-                raw_games.append({"home": home_team, "away": away_team})
+
+                # Extract game date from commence_time
+                commence_time = game.get("commence_time", "")
+                game_date = None
+                if commence_time:
+                    try:
+                        game_dt = datetime.fromisoformat(commence_time.replace("Z", "+00:00"))
+                        game_date = game_dt.strftime("%Y-%m-%d")
+                    except (ValueError, TypeError):
+                        pass
+
+                raw_games.append({"home": home_team, "away": away_team, "date": game_date})
 
                 home_score = None
                 away_score = None
@@ -910,7 +951,7 @@ async def debug_match_test():
                         away_score = int(score.get("score", 0))
 
                 if home_score is not None and away_score is not None:
-                    score_data = {"home": home_score, "away": away_score}
+                    score_data = {"home": home_score, "away": away_score, "game_date": game_date}
                     key = f"{home_team} vs {away_team}"
                     scores[key] = score_data
                     scores[_normalize_team_key(home_team, away_team)] = score_data
@@ -928,13 +969,22 @@ async def debug_match_test():
             # Check fuzzy match
             fuzzy_result = _find_matching_score(bet.home_team, bet.away_team, scores)
 
+            # Check date validation
+            date_match = None
+            if fuzzy_result:
+                score_game_date = fuzzy_result.get("game_date")
+                date_match = score_game_date == bet.date if score_game_date else "unknown"
+
             match_results.append({
                 "bet_teams": bet_key,
+                "bet_date": bet.date,
                 "normalized_bet": normalized_bet_key,
                 "exact_match": exact_match,
                 "normalized_match": normalized_match,
                 "fuzzy_match_found": fuzzy_result is not None,
-                "fuzzy_score": fuzzy_result
+                "fuzzy_score": fuzzy_result,
+                "date_validation": date_match,
+                "would_update": fuzzy_result is not None and date_match is True
             })
 
         return {
@@ -1422,6 +1472,10 @@ async def fetch_and_update_results():
     """
     Fetch completed game scores and update bet results automatically.
     This endpoint checks for games from the past few days that have completed.
+
+    IMPORTANT: Only matches scores to bets when the game date matches.
+    This prevents matching today's pending bets to yesterday's completed games
+    with the same teams.
     """
     try:
         # Get pending bets
@@ -1439,11 +1493,23 @@ async def fetch_and_update_results():
             return {"error": f"Could not fetch scores: {str(e)}", "updated": 0}
 
         # Build scores dict with multiple key formats for matching
+        # Include game date in the dictionary to validate matches
         scores = {}
         for game in scores_data:
             if game.get("completed"):
                 home_team = game.get("home_team")
                 away_team = game.get("away_team")
+
+                # Extract the game date from commence_time
+                commence_time = game.get("commence_time", "")
+                game_date = None
+                if commence_time:
+                    try:
+                        # Parse ISO format datetime and extract date
+                        game_dt = datetime.fromisoformat(commence_time.replace("Z", "+00:00"))
+                        game_date = game_dt.strftime("%Y-%m-%d")
+                    except (ValueError, TypeError):
+                        logger.warning(f"Could not parse commence_time: {commence_time}")
 
                 home_score = None
                 away_score = None
@@ -1455,17 +1521,19 @@ async def fetch_and_update_results():
                         away_score = int(score.get("score", 0))
 
                 if home_score is not None and away_score is not None:
-                    score_data = {"home": home_score, "away": away_score}
+                    score_data = {"home": home_score, "away": away_score, "game_date": game_date}
                     key = f"{home_team} vs {away_team}"
                     scores[key] = score_data
                     scores[_normalize_team_key(home_team, away_team)] = score_data
 
         # Match pending bets to scores using fuzzy matching
         updated = 0
+        skipped_date_mismatch = 0
         for bet in pending:
             if bet.result is not None:
                 continue
 
+            score = None
             game_key = f"{bet.home_team} vs {bet.away_team}"
             if game_key in scores:
                 score = scores[game_key]
@@ -1475,8 +1543,18 @@ async def fetch_and_update_results():
                     score = scores[normalized_key]
                 else:
                     score = _find_matching_score(bet.home_team, bet.away_team, scores)
-                    if not score:
-                        continue
+
+            if not score:
+                continue
+
+            # CRITICAL: Validate that the game date matches the bet date
+            # This prevents matching today's pending bets to yesterday's completed games
+            score_game_date = score.get("game_date")
+            if score_game_date and score_game_date != bet.date:
+                logger.debug(f"Skipping score match - date mismatch: bet date={bet.date}, game date={score_game_date} "
+                            f"for {bet.home_team} vs {bet.away_team}")
+                skipped_date_mismatch += 1
+                continue
 
             updated += bet_history_service.update_single_bet_result(
                 bet.bet_id,
@@ -1488,6 +1566,7 @@ async def fetch_and_update_results():
             "games_found": len(scores) // 2,  # Divided by 2 since we store twice
             "bets_updated": updated,
             "pending_remaining": len(pending) - updated,
+            "skipped_date_mismatch": skipped_date_mismatch,
             "message": f"Found {len(scores)//2} completed games, updated {updated} bets"
         }
     except Exception as e:
