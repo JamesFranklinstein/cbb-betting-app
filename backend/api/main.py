@@ -195,13 +195,15 @@ bet_history_service = BetHistoryService()
 
 # ==================== ENDPOINTS ====================
 
+CODE_VERSION = "2.1-json-fix"
+
 @app.get("/health", response_model=HealthResponse)
 async def health_check():
     """Health check endpoint."""
     return HealthResponse(
         status="healthy",
         timestamp=datetime.now(timezone.utc),
-        version="1.0.0"
+        version=CODE_VERSION
     )
 
 
