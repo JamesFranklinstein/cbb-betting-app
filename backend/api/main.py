@@ -18,7 +18,7 @@ from pydantic import BaseModel, Field
 from clients import KenPomClient, OddsAPIClient
 from services import GameService
 from services.bet_history import BetHistoryService
-from ml import MLPredictor
+from ml import MLPredictor, ML_AVAILABLE
 from models import init_db, get_db, SessionLocal
 
 # Configure logging
@@ -178,7 +178,7 @@ app.add_middleware(
 
 # Service instances
 game_service = GameService()
-ml_predictor = MLPredictor()
+ml_predictor = MLPredictor() if ML_AVAILABLE and MLPredictor else None
 bet_history_service = BetHistoryService()
 
 
@@ -1239,6 +1239,11 @@ async def trigger_ml_retraining(
     min_samples: int = Query(100, description="Minimum training samples required")
 ):
     """Trigger manual ML model retraining using XGBoost."""
+    if not ML_AVAILABLE:
+        raise HTTPException(
+            status_code=503,
+            detail="ML packages not available. Training requires scikit-learn and xgboost."
+        )
     try:
         from ml.feedback_collector import FeedbackCollector
         from ml.xgboost_model import XGBoostPredictor
