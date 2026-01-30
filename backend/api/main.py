@@ -195,7 +195,7 @@ bet_history_service = BetHistoryService()
 
 # ==================== ENDPOINTS ====================
 
-CODE_VERSION = "2.7-earlyreturn"
+CODE_VERSION = "2.8-verifytraining"
 
 @app.get("/health", response_model=HealthResponse)
 async def health_check():
@@ -1703,22 +1703,20 @@ async def train_model_from_stored_bets():
         metrics = predictor.train(train_df, val_df)
         logger.info(f"Training complete")
 
-        # Save model
-        version_str = datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')
-        model_path = predictor.save(version_str)
-
-        # Return early with simple response to test if training works
+        # Return early BEFORE saving to verify training works
         return {
-            "status": "success",
-            "message": "XGBoost model trained and saved successfully",
-            "model_version": f"xgboost_v{version_str}",
+            "status": "success_before_save",
+            "message": "XGBoost model trained successfully (save skipped for testing)",
             "training_samples": int(len(train_df)),
             "validation_samples": int(len(val_df)),
-            "model_path": model_path,
-            "win_accuracy": round(float(metrics["win"]["accuracy"]), 4),
-            "spread_mae": round(float(metrics["spread"]["mae"]), 2),
-            "total_mae": round(float(metrics["total"]["mae"]), 2)
+            "win_accuracy": str(metrics["win"]["accuracy"]),
+            "spread_mae": str(metrics["spread"]["mae"]),
+            "total_mae": str(metrics["total"]["mae"])
         }
+
+        # This code won't run - for reference only
+        version_str = datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')
+        model_path = predictor.save(version_str)
 
         # Convert numpy types to Python native types for JSON serialization
         import json
