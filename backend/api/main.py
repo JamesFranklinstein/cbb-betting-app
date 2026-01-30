@@ -1587,6 +1587,68 @@ async def collect_feedback(
             session.close()
     except Exception as e:
         logger.error(f"Error collecting feedback: {e}")
+
+
+@app.post("/api/ml/build-training-data")
+async def build_training_data_from_kenpom(
+    days_back: int = Query(60, description="Number of days to look back for historical data")
+):
+    """
+    Build training data from KenPom historical predictions and results.
+    This fetches fanmatch data for past games and creates training samples.
+    """
+    try:
+        from ml.historical_data_builder import build_training_data
+
+        result = await build_training_data(days_back=days_back)
+
+        if result["status"] == "success":
+            # Now train the XGBoost model with this data
+            from ml.xgboost_model import XGBoostPredictor, FEATURE_COLUMNS
+            import pandas as pd
+
+            df = pd.read_csv(result["output_path"])
+
+            if len(df) < 50:
+                return {
+                    "status": "insufficient_data",
+                    "samples_collected": len(df),
+                    "message": f"Collected {len(df)} samples, need at least 50 for training"
+                }
+
+            # Split data (time-based)
+            df = df.sort_values('game_date')
+            split_idx = int(len(df) * 0.8)
+            train_df = df.iloc[:split_idx]
+            val_df = df.iloc[split_idx:]
+
+            logger.info(f"Training XGBoost on {len(train_df)} games, validating on {len(val_df)} games")
+
+            # Train XGBoost model
+            predictor = XGBoostPredictor(model_dir="./ml_models")
+            metrics = predictor.train(train_df, val_df)
+
+            # Save model
+            version_str = datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')
+            model_path = predictor.save(version_str)
+
+            return {
+                "status": "success",
+                "samples_collected": len(df),
+                "training_samples": len(train_df),
+                "validation_samples": len(val_df),
+                "data_path": result["output_path"],
+                "model_version": f"xgboost_v{version_str}",
+                "model_path": model_path,
+                "metrics": metrics,
+                "date_range": result.get("date_range")
+            }
+
+        return result
+
+    except Exception as e:
+        logger.error(f"Error building training data: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
         raise HTTPException(status_code=500, detail=str(e))
 
 
