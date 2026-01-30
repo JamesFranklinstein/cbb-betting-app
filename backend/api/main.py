@@ -195,7 +195,7 @@ bet_history_service = BetHistoryService()
 
 # ==================== ENDPOINTS ====================
 
-CODE_VERSION = "2.2-simple-response"
+CODE_VERSION = "2.3-full-conversion"
 
 @app.get("/health", response_model=HealthResponse)
 async def health_check():
@@ -1723,10 +1723,9 @@ async def train_model_from_stored_bets():
             return obj
 
         metrics_clean = convert_to_native(metrics)
-        # Verify it's JSON serializable
-        json.dumps(metrics_clean)
+        date_range_clean = convert_to_native(result.get("date_range"))
 
-        return {
+        response = {
             "status": "success",
             "samples_collected": int(len(df)),
             "training_samples": int(len(train_df)),
@@ -1734,8 +1733,13 @@ async def train_model_from_stored_bets():
             "model_version": f"xgboost_v{version_str}",
             "model_path": model_path,
             "metrics": metrics_clean,
-            "date_range": result.get("date_range")
+            "date_range": date_range_clean
         }
+
+        # Verify everything is JSON serializable
+        json.dumps(response)
+
+        return response
 
     except Exception as e:
         logger.error(f"Error training model from bets: {e}")
