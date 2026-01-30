@@ -195,7 +195,7 @@ bet_history_service = BetHistoryService()
 
 # ==================== ENDPOINTS ====================
 
-CODE_VERSION = "2.3-full-conversion"
+CODE_VERSION = "2.4-jsonresponse"
 
 @app.get("/health", response_model=HealthResponse)
 async def health_check():
@@ -1736,10 +1736,21 @@ async def train_model_from_stored_bets():
             "date_range": date_range_clean
         }
 
-        # Verify everything is JSON serializable
-        json.dumps(response)
+        # Use JSONResponse to ensure proper serialization
+        from fastapi.responses import JSONResponse
 
-        return response
+        class NumpyEncoder(json.JSONEncoder):
+            def default(self, obj):
+                import numpy as np
+                if isinstance(obj, (np.integer, np.floating)):
+                    return float(obj)
+                if isinstance(obj, np.ndarray):
+                    return obj.tolist()
+                return super().default(obj)
+
+        return JSONResponse(
+            content=json.loads(json.dumps(response, cls=NumpyEncoder))
+        )
 
     except Exception as e:
         logger.error(f"Error training model from bets: {e}")
