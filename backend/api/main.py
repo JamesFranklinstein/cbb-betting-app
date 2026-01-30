@@ -1225,11 +1225,159 @@ async def compare_ml_versions(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.get("/api/ml/data/analyze")
+async def analyze_training_data():
+    """Analyze training data for quality issues (false results, invalid scores, etc.)."""
+    try:
+        from ml.data_cleaner import DataCleaner
+
+        with DataCleaner() as cleaner:
+            bet_issues = cleaner.analyze_stored_bets()
+            training_issues = cleaner.analyze_training_data()
+
+            return {
+                "stored_bets": {
+                    "total": bet_issues["total_bets"],
+                    "graded": bet_issues["graded_bets"],
+                    "pending": bet_issues["pending_bets"],
+                    "issues": {
+                        "future_graded": len(bet_issues["future_graded"]),
+                        "invalid_scores": len(bet_issues["invalid_scores"]),
+                        "inconsistent_games": len(bet_issues["inconsistent_games"]),
+                    },
+                    "future_graded_sample": bet_issues["future_graded"][:5],
+                    "invalid_scores_sample": bet_issues["invalid_scores"][:5],
+                    "inconsistent_games_sample": bet_issues["inconsistent_games"][:5],
+                },
+                "training_data": {
+                    "total": training_issues["total_records"],
+                    "issues": {
+                        "missing_scores": len(training_issues["missing_scores"]),
+                        "invalid_scores": len(training_issues["invalid_scores"]),
+                        "missing_features": len(training_issues["missing_features"]),
+                        "large_errors": len(training_issues["large_errors"]),
+                    }
+                }
+            }
+    except Exception as e:
+        logger.error(f"Error analyzing training data: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/ml/data/clean")
+async def clean_training_data(
+    dry_run: bool = Query(True, description="If true, only report what would be cleaned")
+):
+    """Clean training data by removing false results and invalid records."""
+    try:
+        from ml.data_cleaner import DataCleaner
+
+        with DataCleaner() as cleaner:
+            results = cleaner.clean_all(dry_run=dry_run)
+
+            return {
+                "dry_run": dry_run,
+                "actions": {
+                    "future_graded_reset": len(results["future_graded_reset"]),
+                    "invalid_scores_reset": len(results["invalid_scores_reset"]),
+                    "inconsistent_games_reset": len(results["inconsistent_games_reset"]),
+                    "invalid_training_deleted": results["invalid_training_deleted"],
+                },
+                "summary": results["summary"],
+                "message": "Dry run - no changes made" if dry_run else "Data cleaned successfully"
+            }
+    except Exception as e:
+        logger.error(f"Error cleaning training data: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/ml/retrain/xgboost")
+async def trigger_xgboost_retraining(
+    min_samples: int = Query(100, description="Minimum training samples required")
+):
+    """Train a new XGBoost model (recommended over PyTorch for tabular data)."""
+    try:
+        from ml.feedback_collector import FeedbackCollector
+        from ml.xgboost_model import XGBoostPredictor, FEATURE_COLUMNS
+        from ml.version_manager import ModelVersionManager
+
+        session = SessionLocal()
+        try:
+            # Get training data
+            collector = FeedbackCollector(session)
+            df = collector.get_training_dataframe()
+
+            if len(df) < min_samples:
+                return {
+                    "status": "skipped",
+                    "reason": "insufficient_data",
+                    "available_samples": len(df),
+                    "required_samples": min_samples
+                }
+
+            # Split data (time-based)
+            df = df.sort_values('game_date')
+            split_idx = int(len(df) * 0.8)
+            train_df = df.iloc[:split_idx]
+            val_df = df.iloc[split_idx:]
+
+            logger.info(f"Training XGBoost on {len(train_df)} games, validating on {len(val_df)} games")
+
+            # Train new model
+            predictor = XGBoostPredictor(model_dir="./ml_models")
+            metrics = predictor.train(train_df, val_df)
+
+            # Save model
+            version_str = datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')
+            model_path = predictor.save(version_str)
+
+            # Get feature importance
+            importance = predictor.get_feature_importance()
+
+            # Register version in database
+            version_manager = ModelVersionManager("./ml_models", session)
+            version = version_manager.create_version(
+                model_type='XGBoost',
+                features=FEATURE_COLUMNS,
+                hyperparameters={
+                    'n_estimators': 200,
+                    'max_depth': 6,
+                    'learning_rate': 0.05,
+                },
+                training_metrics={
+                    'brier_score': metrics['win']['brier_score'],
+                    'accuracy': metrics['win']['accuracy'],
+                    'spread_mae': metrics['spread']['mae'],
+                    'total_mae': metrics['total']['mae'],
+                },
+                model_path=model_path
+            )
+
+            return {
+                "status": "success",
+                "version": f"xgboost_v{version_str}",
+                "model_path": model_path,
+                "metrics": metrics,
+                "training_samples": len(train_df),
+                "validation_samples": len(val_df),
+                "top_features": {
+                    "win": list(importance['win'].items())[:5],
+                    "spread": list(importance['spread'].items())[:5],
+                    "total": list(importance['total'].items())[:5],
+                }
+            }
+        finally:
+            session.close()
+    except Exception as e:
+        logger.error(f"Error during XGBoost training: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.post("/api/ml/retrain")
 async def trigger_ml_retraining(
     min_samples: int = Query(100, description="Minimum training samples required")
 ):
-    """Trigger manual ML model retraining."""
+    """Trigger manual ML model retraining (PyTorch - legacy)."""
     try:
         from ml.feedback_collector import FeedbackCollector
         from ml.trainer import CBBModelTrainer
