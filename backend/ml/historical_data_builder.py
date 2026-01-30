@@ -1,8 +1,8 @@
 """
 Historical Data Builder
 
-Builds training data from KenPom historical predictions and results.
-Uses the archive endpoint to get historical ratings and fanmatch for predictions.
+Builds training data from KenPom historical predictions and stored bet results.
+Uses stored bets with results as the source of truth for actual game outcomes.
 """
 
 import asyncio
@@ -13,6 +13,7 @@ import pandas as pd
 import numpy as np
 
 from clients.kenpom import KenPomClient
+from services.bet_history import BetHistoryService
 
 logger = logging.getLogger(__name__)
 
@@ -244,6 +245,140 @@ class HistoricalDataBuilder:
         start_date = end_date - timedelta(days=days_back)
 
         return await self.build_from_fanmatch_history(start_date, end_date)
+
+    async def build_from_stored_bets(self) -> pd.DataFrame:
+        """
+        Build training data from stored bets with results.
+
+        This uses the graded bets in the database as the source of actual
+        game outcomes, combined with current KenPom ratings for features.
+
+        Returns:
+            DataFrame with training data
+        """
+        bet_service = BetHistoryService()
+        all_bets = bet_service.get_all_bets()
+
+        # Get only graded bets from past dates
+        today = date.today().isoformat()
+        graded_bets = [
+            b for b in all_bets
+            if b.result is not None and b.date and b.date < today
+        ]
+
+        logger.info(f"Found {len(graded_bets)} graded bets from past dates")
+
+        if not graded_bets:
+            return pd.DataFrame()
+
+        # Group bets by unique game (home_team, away_team, date)
+        games = {}
+        for bet in graded_bets:
+            game_key = (bet.home_team, bet.away_team, bet.date)
+            if game_key not in games:
+                games[game_key] = bet
+
+        logger.info(f"Found {len(games)} unique games")
+
+        # Load current ratings (will be approximate for historical games)
+        await self._load_ratings_for_date(date.today().isoformat())
+
+        all_data = []
+        for (home_team, away_team, game_date), bet in games.items():
+            try:
+                # Skip if we don't have scores
+                if bet.home_score is None or bet.away_score is None:
+                    continue
+
+                # Validate scores
+                if bet.home_score < 30 or bet.away_score < 30:
+                    logger.warning(f"Skipping game with invalid scores: {away_team}@{home_team} {bet.away_score}-{bet.home_score}")
+                    continue
+                if bet.home_score > 150 or bet.away_score > 150:
+                    logger.warning(f"Skipping game with invalid scores: {away_team}@{home_team} {bet.away_score}-{bet.home_score}")
+                    continue
+
+                # Get team stats
+                home_stats = self._get_team_data(home_team)
+                away_stats = self._get_team_data(away_team)
+
+                # Compute features
+                features = self._compute_features(home_stats, away_stats)
+
+                # Create training sample
+                sample = {
+                    "game_date": game_date,
+                    "home_team": home_team,
+                    "away_team": away_team,
+                    "home_rank": bet.home_rank or 0,
+                    "away_rank": bet.away_rank or 0,
+                    "kenpom_spread": bet.kenpom_spread or 0.0,
+                    "kenpom_total": bet.kenpom_total or 0.0,
+                    "vegas_spread": bet.vegas_spread or 0.0,
+                    "vegas_total": bet.vegas_total or 0.0,
+                    "actual_home_score": bet.home_score,
+                    "actual_away_score": bet.away_score,
+                    "actual_spread": bet.home_score - bet.away_score,
+                    "actual_total": bet.home_score + bet.away_score,
+                    "home_won": 1 if bet.home_score > bet.away_score else 0,
+                    **features
+                }
+
+                all_data.append(sample)
+
+            except Exception as e:
+                logger.warning(f"Error processing game {away_team}@{home_team}: {e}")
+                continue
+
+        if not all_data:
+            logger.warning("No training data built from stored bets")
+            return pd.DataFrame()
+
+        df = pd.DataFrame(all_data)
+        logger.info(f"Built {len(df)} training samples from stored bets")
+
+        return df
+
+
+async def build_training_data_from_bets() -> Dict[str, Any]:
+    """
+    Build training data from stored bets with results.
+
+    This is the preferred method as it uses verified game outcomes.
+
+    Returns:
+        Dict with status and training data
+    """
+    builder = HistoricalDataBuilder()
+
+    try:
+        df = await builder.build_from_stored_bets()
+
+        if df.empty:
+            return {
+                "status": "error",
+                "message": "No training data could be built from stored bets",
+                "samples": 0
+            }
+
+        return {
+            "status": "success",
+            "samples": len(df),
+            "date_range": {
+                "start": df["game_date"].min(),
+                "end": df["game_date"].max()
+            },
+            "columns": list(df.columns),
+            "data": df.to_dict(orient="records")
+        }
+
+    except Exception as e:
+        logger.error(f"Error building training data from bets: {e}")
+        return {
+            "status": "error",
+            "message": str(e),
+            "samples": 0
+        }
 
 
 async def build_training_data(days_back: int = 60) -> Dict[str, Any]:

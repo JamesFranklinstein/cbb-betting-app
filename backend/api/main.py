@@ -1649,6 +1649,69 @@ async def build_training_data_from_kenpom(
     except Exception as e:
         logger.error(f"Error building training data: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/ml/train-from-bets")
+async def train_model_from_stored_bets():
+    """
+    Build training data from stored bets with verified results and train XGBoost model.
+    This is the preferred method as it uses actual graded bet outcomes.
+    """
+    try:
+        from ml.historical_data_builder import build_training_data_from_bets
+        from ml.xgboost_model import XGBoostPredictor, FEATURE_COLUMNS
+        import pandas as pd
+
+        # Build training data from stored bets
+        result = await build_training_data_from_bets()
+
+        if result["status"] != "success":
+            return result
+
+        # Convert to DataFrame
+        df = pd.DataFrame(result["data"])
+
+        if len(df) < 50:
+            return {
+                "status": "insufficient_data",
+                "samples_collected": len(df),
+                "message": f"Collected {len(df)} samples, need at least 50 for training"
+            }
+
+        # Check that we have the required feature columns
+        missing_cols = [col for col in FEATURE_COLUMNS if col not in df.columns]
+        if missing_cols:
+            logger.warning(f"Missing feature columns: {missing_cols}")
+
+        # Split data (time-based)
+        df = df.sort_values('game_date')
+        split_idx = int(len(df) * 0.8)
+        train_df = df.iloc[:split_idx]
+        val_df = df.iloc[split_idx:]
+
+        logger.info(f"Training XGBoost on {len(train_df)} games, validating on {len(val_df)} games")
+
+        # Train XGBoost model
+        predictor = XGBoostPredictor(model_dir="./ml_models")
+        metrics = predictor.train(train_df, val_df)
+
+        # Save model
+        version_str = datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')
+        model_path = predictor.save(version_str)
+
+        return {
+            "status": "success",
+            "samples_collected": len(df),
+            "training_samples": len(train_df),
+            "validation_samples": len(val_df),
+            "model_version": f"xgboost_v{version_str}",
+            "model_path": model_path,
+            "metrics": metrics,
+            "date_range": result.get("date_range")
+        }
+
+    except Exception as e:
+        logger.error(f"Error training model from bets: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
