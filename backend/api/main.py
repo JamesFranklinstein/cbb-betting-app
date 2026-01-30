@@ -1656,6 +1656,7 @@ async def train_model_from_stored_bets():
     """
     Build training data from stored bets with verified results and train XGBoost model.
     This is the preferred method as it uses actual graded bet outcomes.
+    Version: 2.1 - Fixed JSON serialization
     """
     try:
         logger.info("[TRAIN_V2] Starting train-from-bets endpoint")
