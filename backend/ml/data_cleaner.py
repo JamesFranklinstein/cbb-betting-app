@@ -18,6 +18,7 @@ from sqlalchemy.orm import Session
 
 from models.database import StoredBet, TrainingData, Game
 from models.connection import SessionLocal
+from services.bet_history import BetHistoryService
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +33,7 @@ class DataCleaner:
     def __init__(self, session: Optional[Session] = None):
         self.session = session or SessionLocal()
         self._owns_session = session is None
+        self.bet_service = BetHistoryService()
 
     def close(self):
         """Close the session if we own it."""
@@ -53,7 +55,8 @@ class DataCleaner:
         Returns:
             Dict with analysis results including counts and problematic records
         """
-        all_bets = self.session.query(StoredBet).all()
+        # Use the BetHistoryService which is known to work
+        all_bets = self.bet_service.get_all_bets()
 
         issues = {
             "total_bets": len(all_bets),
@@ -181,26 +184,35 @@ class DataCleaner:
         """
         today = datetime.now().strftime("%Y-%m-%d")
 
-        future_graded = self.session.query(StoredBet).filter(
-            and_(
-                StoredBet.date >= today,
-                StoredBet.result.isnot(None)
-            )
-        ).all()
+        # Get all bets and filter for future-graded ones
+        all_bets = self.bet_service.get_all_bets()
+        future_graded = [
+            bet for bet in all_bets
+            if bet.date and bet.date >= today and bet.result is not None
+        ]
 
         reset_ids = []
         for bet in future_graded:
             reset_ids.append(bet.bet_id)
             if not dry_run:
-                bet.result = None
-                bet.home_score = None
-                bet.away_score = None
-                bet.actual_margin = None
-                bet.actual_total = None
-                bet.settled_at = None
+                # Use a fresh session to reset
+                session = SessionLocal()
+                try:
+                    db_bet = session.query(StoredBet).filter(
+                        StoredBet.bet_id == bet.bet_id
+                    ).first()
+                    if db_bet:
+                        db_bet.result = None
+                        db_bet.home_score = None
+                        db_bet.away_score = None
+                        db_bet.actual_margin = None
+                        db_bet.actual_total = None
+                        db_bet.settled_at = None
+                        session.commit()
+                finally:
+                    session.close()
 
-        if not dry_run:
-            self.session.commit()
+        if not dry_run and reset_ids:
             logger.info(f"Reset {len(reset_ids)} future-graded bets")
 
         return reset_ids
@@ -215,33 +227,39 @@ class DataCleaner:
         Returns:
             List of bet_ids that were (or would be) reset
         """
-        invalid_bets = self.session.query(StoredBet).filter(
-            and_(
-                StoredBet.result.isnot(None),
-                or_(
-                    StoredBet.home_score < self.MIN_VALID_SCORE,
-                    StoredBet.away_score < self.MIN_VALID_SCORE,
-                    StoredBet.home_score > self.MAX_VALID_SCORE,
-                    StoredBet.away_score > self.MAX_VALID_SCORE,
-                    StoredBet.home_score < 0,
-                    StoredBet.away_score < 0
-                )
-            )
-        ).all()
+        # Get all bets and filter for invalid scores
+        all_bets = self.bet_service.get_all_bets()
+        invalid_bets = []
+        for bet in all_bets:
+            if bet.result is not None and bet.home_score is not None and bet.away_score is not None:
+                if (bet.home_score < self.MIN_VALID_SCORE or
+                    bet.away_score < self.MIN_VALID_SCORE or
+                    bet.home_score > self.MAX_VALID_SCORE or
+                    bet.away_score > self.MAX_VALID_SCORE or
+                    bet.home_score < 0 or bet.away_score < 0):
+                    invalid_bets.append(bet)
 
         reset_ids = []
         for bet in invalid_bets:
             reset_ids.append(bet.bet_id)
             if not dry_run:
-                bet.result = None
-                bet.home_score = None
-                bet.away_score = None
-                bet.actual_margin = None
-                bet.actual_total = None
-                bet.settled_at = None
+                session = SessionLocal()
+                try:
+                    db_bet = session.query(StoredBet).filter(
+                        StoredBet.bet_id == bet.bet_id
+                    ).first()
+                    if db_bet:
+                        db_bet.result = None
+                        db_bet.home_score = None
+                        db_bet.away_score = None
+                        db_bet.actual_margin = None
+                        db_bet.actual_total = None
+                        db_bet.settled_at = None
+                        session.commit()
+                finally:
+                    session.close()
 
-        if not dry_run:
-            self.session.commit()
+        if not dry_run and reset_ids:
             logger.info(f"Reset {len(reset_ids)} invalid-score bets")
 
         return reset_ids
@@ -256,14 +274,13 @@ class DataCleaner:
         Returns:
             List of bet_ids that were (or would be) reset
         """
-        # Find inconsistent games
-        all_bets = self.session.query(StoredBet).filter(
-            StoredBet.result.isnot(None)
-        ).all()
+        # Get all graded bets
+        all_bets = self.bet_service.get_all_bets()
+        graded_bets = [bet for bet in all_bets if bet.result is not None]
 
         # Group by game
         games = defaultdict(list)
-        for bet in all_bets:
+        for bet in graded_bets:
             game_key = (bet.home_team, bet.away_team, bet.date)
             games[game_key].append(bet)
 
@@ -280,15 +297,23 @@ class DataCleaner:
                     for bet in bets:
                         reset_ids.append(bet.bet_id)
                         if not dry_run:
-                            bet.result = None
-                            bet.home_score = None
-                            bet.away_score = None
-                            bet.actual_margin = None
-                            bet.actual_total = None
-                            bet.settled_at = None
+                            session = SessionLocal()
+                            try:
+                                db_bet = session.query(StoredBet).filter(
+                                    StoredBet.bet_id == bet.bet_id
+                                ).first()
+                                if db_bet:
+                                    db_bet.result = None
+                                    db_bet.home_score = None
+                                    db_bet.away_score = None
+                                    db_bet.actual_margin = None
+                                    db_bet.actual_total = None
+                                    db_bet.settled_at = None
+                                    session.commit()
+                            finally:
+                                session.close()
 
-        if not dry_run:
-            self.session.commit()
+        if not dry_run and reset_ids:
             logger.info(f"Reset {len(reset_ids)} bets from inconsistent games")
 
         return reset_ids
