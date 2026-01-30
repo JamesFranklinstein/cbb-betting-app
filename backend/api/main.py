@@ -195,7 +195,7 @@ bet_history_service = BetHistoryService()
 
 # ==================== ENDPOINTS ====================
 
-CODE_VERSION = "2.1-json-fix"
+CODE_VERSION = "2.2-simple-response"
 
 @app.get("/health", response_model=HealthResponse)
 async def health_check():
@@ -1708,6 +1708,8 @@ async def train_model_from_stored_bets():
         model_path = predictor.save(version_str)
 
         # Convert numpy types to Python native types for JSON serialization
+        import json
+
         def convert_to_native(obj):
             import numpy as np
             if isinstance(obj, dict):
@@ -1720,6 +1722,10 @@ async def train_model_from_stored_bets():
                 return obj.tolist()
             return obj
 
+        metrics_clean = convert_to_native(metrics)
+        # Verify it's JSON serializable
+        json.dumps(metrics_clean)
+
         return {
             "status": "success",
             "samples_collected": int(len(df)),
@@ -1727,7 +1733,7 @@ async def train_model_from_stored_bets():
             "validation_samples": int(len(val_df)),
             "model_version": f"xgboost_v{version_str}",
             "model_path": model_path,
-            "metrics": convert_to_native(metrics),
+            "metrics": metrics_clean,
             "date_range": result.get("date_range")
         }
 
