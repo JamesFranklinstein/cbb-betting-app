@@ -19,19 +19,29 @@ from typing import Dict, Any, Optional, Tuple, List
 
 import numpy as np
 import pandas as pd
-from sklearn.model_selection import train_test_split, cross_val_score
-from sklearn.calibration import CalibratedClassifierCV
-from sklearn.preprocessing import StandardScaler
-from sklearn.metrics import (
-    brier_score_loss, log_loss, accuracy_score,
-    mean_squared_error, mean_absolute_error, r2_score
-)
+
+# sklearn and xgboost are optional - only needed for training
+try:
+    from sklearn.model_selection import train_test_split, cross_val_score
+    from sklearn.calibration import CalibratedClassifierCV
+    from sklearn.preprocessing import StandardScaler
+    from sklearn.metrics import (
+        brier_score_loss, log_loss, accuracy_score,
+        mean_squared_error, mean_absolute_error, r2_score
+    )
+    HAS_SKLEARN = True
+except ImportError:
+    HAS_SKLEARN = False
+    train_test_split = None
+    CalibratedClassifierCV = None
+    StandardScaler = None
 
 try:
     import xgboost as xgb
     HAS_XGBOOST = True
 except ImportError:
     HAS_XGBOOST = False
+    xgb = None
     logging.warning("XGBoost not installed. Install with: pip install xgboost")
 
 logger = logging.getLogger(__name__)

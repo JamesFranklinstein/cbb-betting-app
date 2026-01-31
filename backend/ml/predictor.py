@@ -15,7 +15,14 @@ from dataclasses import dataclass
 
 import numpy as np
 import pandas as pd
-from sklearn.preprocessing import StandardScaler
+
+# sklearn is optional - only needed for training
+try:
+    from sklearn.preprocessing import StandardScaler
+    HAS_SKLEARN = True
+except ImportError:
+    StandardScaler = None
+    HAS_SKLEARN = False
 
 from .xgboost_model import XGBoostPredictor, FEATURE_COLUMNS
 
