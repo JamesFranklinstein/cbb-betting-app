@@ -195,7 +195,7 @@ bet_history_service = BetHistoryService()
 
 # ==================== ENDPOINTS ====================
 
-CODE_VERSION = "3.1-metadatafix"
+CODE_VERSION = "3.2-stats-filter"
 
 @app.get("/health", response_model=HealthResponse)
 async def health_check():
@@ -697,11 +697,17 @@ async def get_bet_history(
 
 
 @app.get("/api/bet-history/stats")
-async def get_betting_stats():
+async def get_betting_stats(
+    start_date: str = Query(None, description="Start date filter (YYYY-MM-DD). Defaults to today.")
+):
     """Get overall betting statistics and performance."""
     try:
-        stats = bet_history_service.get_overall_stats()
+        # Default to today's date to show fresh stats
+        if start_date is None:
+            start_date = datetime.now().strftime("%Y-%m-%d")
+        stats = bet_history_service.get_overall_stats(start_date=start_date)
         return {
+            "start_date": start_date,
             "total_bets": stats.total_bets,
             "total_wins": stats.total_wins,
             "total_losses": stats.total_losses,
