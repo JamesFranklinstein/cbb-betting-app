@@ -21,6 +21,7 @@ numpy==1.26.3
 # Scheduling (for automated tasks)
 apscheduler>=3.10.4
 
-# Note: ML packages (scikit-learn, xgboost) removed to stay under
-# Vercel's 300MB limit. The API uses KenPom predictions directly.
-# For ML training, install locally: pip install scikit-learn xgboost
+# Machine Learning
+scikit-learn==1.4.0
+xgboost==2.0.3
+joblib==1.3.2
