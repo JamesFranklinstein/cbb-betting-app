@@ -1611,14 +1611,9 @@ class ValueCalculator:
             home_stats, away_stats, bet_type, stat_comparison
         )
 
-        # Calculate total score
+        # Total score is computed automatically by the total_score property
         # Max: 50 (win prob) + 20 (stats) + 10 (situational) + 0 (variance) = 80
-        factors.total_score = (
-            factors.edge_score +
-            factors.statistical_edge_score +
-            factors.situational_score +
-            factors.variance_penalty  # This is 0 or negative
-        )
+        # (model_agreement_score, bet_type_strength_score, early_season_penalty default to 0)
 
         # Determine tier based on total score
         # For win-prob based: High >= 55, Medium >= 40, Low < 40
