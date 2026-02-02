@@ -300,6 +300,8 @@ async def get_value_bets(
                             "odds": vb.market_odds,
                             "line": vb.market_line,
                             "book": vb.recommended_book,
+                            "model_prob": vb.model_prob,
+                            "market_implied_prob": vb.market_implied_prob,
                             "edge": vb.edge,
                             "ev": vb.ev,
                             "kelly": vb.kelly_fraction,
