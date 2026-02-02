@@ -698,13 +698,11 @@ async def get_bet_history(
 
 @app.get("/api/bet-history/stats")
 async def get_betting_stats(
-    start_date: str = Query(None, description="Start date filter (YYYY-MM-DD). Defaults to today.")
+    start_date: str = Query(None, description="Start date filter (YYYY-MM-DD). Defaults to all time.")
 ):
     """Get overall betting statistics and performance."""
     try:
-        # Default to today's date to show fresh stats
-        if start_date is None:
-            start_date = datetime.now().strftime("%Y-%m-%d")
+        # Default to None to show all historical stats
         stats = bet_history_service.get_overall_stats(start_date=start_date)
         return {
             "start_date": start_date,
@@ -749,6 +747,14 @@ async def get_betting_stats(
                 "longest_loss": stats.longest_loss_streak
             },
             "recent": {
+                "today": {
+                    "record": stats.today_record,
+                    "win_rate": stats.today_win_rate
+                },
+                "yesterday": {
+                    "record": stats.yesterday_record,
+                    "win_rate": stats.yesterday_win_rate
+                },
                 "last_7_days": {
                     "record": stats.last_7_days_record,
                     "win_rate": stats.last_7_days_win_rate

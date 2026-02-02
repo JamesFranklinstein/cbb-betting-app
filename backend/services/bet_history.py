@@ -132,6 +132,10 @@ class OverallStats:
     longest_loss_streak: int = 0
 
     # Recent performance
+    today_record: str = "0-0-0"
+    today_win_rate: float = 0.0
+    yesterday_record: str = "0-0-0"
+    yesterday_win_rate: float = 0.0
     last_7_days_record: str = "0-0-0"
     last_7_days_win_rate: float = 0.0
     last_30_days_record: str = "0-0-0"
@@ -664,7 +668,25 @@ class BetHistoryService:
                     current_w = 0
                     stats.longest_loss_streak = max(stats.longest_loss_streak, current_l)
 
-        # Recent performance
+        # Recent performance - Today
+        today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        today_bets = self.get_bets_by_date(today_str)
+        wt = len([b for b in today_bets if b.result == 'win'])
+        lt = len([b for b in today_bets if b.result == 'loss'])
+        pt = len([b for b in today_bets if b.result == 'push'])
+        stats.today_record = f"{wt}-{lt}-{pt}"
+        stats.today_win_rate = wt / (wt + lt) if (wt + lt) > 0 else 0.0
+
+        # Recent performance - Yesterday
+        yesterday_str = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%d")
+        yesterday_bets = self.get_bets_by_date(yesterday_str)
+        wy = len([b for b in yesterday_bets if b.result == 'win'])
+        ly = len([b for b in yesterday_bets if b.result == 'loss'])
+        py = len([b for b in yesterday_bets if b.result == 'push'])
+        stats.yesterday_record = f"{wy}-{ly}-{py}"
+        stats.yesterday_win_rate = wy / (wy + ly) if (wy + ly) > 0 else 0.0
+
+        # Recent performance - Last 7 days
         last_7 = self.get_recent_bets(7)
         w7 = len([b for b in last_7 if b.result == 'win'])
         l7 = len([b for b in last_7 if b.result == 'loss'])
@@ -672,6 +694,7 @@ class BetHistoryService:
         stats.last_7_days_record = f"{w7}-{l7}-{p7}"
         stats.last_7_days_win_rate = w7 / (w7 + l7) if (w7 + l7) > 0 else 0.0
 
+        # Recent performance - Last 30 days
         last_30 = self.get_recent_bets(30)
         w30 = len([b for b in last_30 if b.result == 'win'])
         l30 = len([b for b in last_30 if b.result == 'loss'])

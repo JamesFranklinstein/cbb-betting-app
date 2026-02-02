@@ -998,14 +998,24 @@ class ValueCalculator:
     confidence scoring for more accurate value detection.
     """
 
-    # Minimum edge required to flag as a value bet
-    # UPDATED: Increased thresholds based on historical performance analysis
-    # Spreads: 44% win rate at 3% threshold -> raise to 5%
-    # ML: 39% win rate at 5% threshold -> raise to 8%
-    # Totals: 54% win rate at 3% -> keep at 3% (working well)
-    MIN_EDGE_SPREAD = 0.05    # 5% edge on spread (was 3%)
+    # OVERHAUL: Focus on WIN PROBABILITY not edge/value
+    # Totals still use edge (58% win rate) - keep that approach
+    # Spreads and ML use WIN PROBABILITY thresholds - model must be confident bet wins
+
+    # For Totals: Keep edge-based approach (working at 58%)
     MIN_EDGE_TOTAL = 0.03     # 3% edge on totals (unchanged - performing well)
-    MIN_EDGE_ML = 0.08        # 8% edge on moneyline (was 5%)
+
+    # For Spreads: Model must predict cover probability >= this threshold
+    # Higher threshold = more selective, should improve win rate
+    MIN_WIN_PROB_SPREAD = 0.55  # 55% model confidence required to recommend spread bet
+
+    # For Moneyline: Model must predict win probability >= this threshold
+    # Even higher for ML since these are straight-up winner picks
+    MIN_WIN_PROB_ML = 0.60      # 60% model confidence required to recommend ML bet
+
+    # Legacy edge settings (only used for totals now)
+    MIN_EDGE_SPREAD = 0.05    # Not used anymore - replaced by win prob threshold
+    MIN_EDGE_ML = 0.08        # Not used anymore - replaced by win prob threshold
 
     # Maximum edge cap - edges above this are almost certainly data issues
     # rather than true value opportunities. Large discrepancies between
@@ -1036,11 +1046,15 @@ class ValueCalculator:
         self,
         min_edge_spread: float = 0.03,
         min_edge_total: float = 0.03,
-        min_edge_ml: float = 0.05
+        min_edge_ml: float = 0.05,
+        min_win_prob_spread: float = 0.55,
+        min_win_prob_ml: float = 0.60
     ):
-        self.min_edge_spread = min_edge_spread
+        self.min_edge_spread = min_edge_spread  # Legacy - only for totals display
         self.min_edge_total = min_edge_total
-        self.min_edge_ml = min_edge_ml
+        self.min_edge_ml = min_edge_ml  # Legacy - only for display
+        self.min_win_prob_spread = min_win_prob_spread  # NEW: Win probability threshold for spreads
+        self.min_win_prob_ml = min_win_prob_ml  # NEW: Win probability threshold for ML
 
     # ==================== ADVANCED METRICS ====================
 
@@ -1531,7 +1545,105 @@ class ValueCalculator:
         capped_edge = min(edge, self.MAX_EDGE_CAP)
         capped_ev = min(ev, self.MAX_EV_CAP)
         return capped_edge, capped_ev
-    
+
+    def _get_win_prob_confidence(
+        self,
+        model_prob: float,
+        bet_type: BetType,
+        stat_comparison: Optional['TeamStatComparison'] = None,
+        situational: Optional[SituationalFactors] = None,
+        home_stats: Optional[TeamStats] = None,
+        away_stats: Optional[TeamStats] = None
+    ) -> Tuple[str, 'ConfidenceFactors']:
+        """
+        Calculate confidence based on WIN PROBABILITY instead of edge.
+
+        NEW: For spreads and ML, we care about how confident the model is
+        that the bet will WIN, not whether it represents "value".
+
+        Higher win probability = higher confidence.
+        """
+        factors = ConfidenceFactors(factors_detail={})
+
+        # 1. WIN PROBABILITY SCORE (0-50 points)
+        # This is now the PRIMARY factor
+        if bet_type == BetType.MONEYLINE:
+            # For ML: 60% is threshold, scale up from there
+            # 60% = 25pts, 70% = 37.5pts, 80% = 50pts
+            win_prob_score = min(50.0, (model_prob - 0.50) * 100)
+        else:
+            # For spreads: 55% is threshold
+            # 55% = 25pts, 65% = 37.5pts, 75% = 50pts
+            win_prob_score = min(50.0, (model_prob - 0.45) * 125)
+
+        factors.edge_score = win_prob_score  # Reuse edge_score field for win prob
+        factors.factors_detail["win_probability"] = {
+            "model_prob": model_prob,
+            "score": win_prob_score,
+            "interpretation": self._interpret_win_prob(model_prob, bet_type)
+        }
+
+        # 2. STATISTICAL MATCHUP (0-20 points) - Keep this, it matters for winning
+        if stat_comparison:
+            factors.statistical_edge_score = self._score_statistical_matchup(
+                stat_comparison, bet_type
+            )
+            factors.factors_detail["statistical"] = {
+                "score": factors.statistical_edge_score,
+                "efficiency_edge": stat_comparison.efficiency_edge,
+                "shooting_edge": stat_comparison.shooting_edge,
+                "rebounding_edge": stat_comparison.rebounding_edge,
+                "turnover_edge": stat_comparison.turnover_edge
+            }
+        else:
+            factors.statistical_edge_score = 10.0  # Neutral
+
+        # 3. SITUATIONAL FACTORS (0-10 points)
+        if situational:
+            factors.situational_score = self._score_situational_factors(
+                situational, bet_type
+            )
+        else:
+            factors.situational_score = 5.0
+
+        # 4. VARIANCE PENALTY (-5 to 0) - High variance reduces confidence
+        factors.variance_penalty = self._calculate_variance_penalty(
+            home_stats, away_stats, bet_type, stat_comparison
+        )
+
+        # Calculate total score
+        # Max: 50 (win prob) + 20 (stats) + 10 (situational) + 0 (variance) = 80
+        factors.total_score = (
+            factors.edge_score +
+            factors.statistical_edge_score +
+            factors.situational_score +
+            factors.variance_penalty  # This is 0 or negative
+        )
+
+        # Determine tier based on total score
+        # For win-prob based: High >= 55, Medium >= 40, Low < 40
+        if factors.total_score >= 55:
+            tier = "high"
+        elif factors.total_score >= 40:
+            tier = "medium"
+        else:
+            tier = "low"
+
+        return tier, factors
+
+    def _interpret_win_prob(self, prob: float, bet_type: BetType) -> str:
+        """Interpret win probability level."""
+        if prob >= 0.70:
+            return "Very Strong"
+        elif prob >= 0.65:
+            return "Strong"
+        elif prob >= 0.60:
+            return "Good"
+        elif prob >= 0.55:
+            return "Moderate"
+        else:
+            return "Weak"
+
     def get_confidence_level(self, edge: float, bet_type: BetType) -> str:
         """Categorize confidence based on edge size (legacy method for backwards compatibility)."""
         if bet_type == BetType.MONEYLINE:
@@ -2306,7 +2418,13 @@ class ValueCalculator:
         ml_prob: Optional[float] = None,
         line_movement: Optional[Dict[str, float]] = None
     ) -> List[ValueBet]:
-        """Check for spread betting value with game-specific adjustments."""
+        """
+        Check for spread betting opportunities based on WIN PROBABILITY.
+
+        OVERHAUL: No longer uses edge-based value calculation.
+        Instead, recommends bets where the model predicts high win probability.
+        The goal is WINNERS not value.
+        """
         values = []
 
         if market.spread == 0:
@@ -2315,7 +2433,7 @@ class ValueCalculator:
         if std_dev is None:
             std_dev = self.BASE_SPREAD_STD_DEV
 
-        # Extract team stats for enhanced confidence scoring
+        # Extract team stats for confidence scoring
         home_stats = None
         away_stats = None
         stat_comparison = None
@@ -2327,30 +2445,33 @@ class ValueCalculator:
         # Our predicted margin (positive = home wins by that much)
         predicted_margin = prediction.home_score - prediction.away_score
 
-        # Check home team covering with adjusted std dev
+        # Calculate cover probabilities
         home_cover_prob = self.cover_spread_prob(predicted_margin, market.spread, std_dev)
-        home_implied = self.american_to_implied_prob(market.best_spread_home_odds)
-        home_edge = (home_cover_prob - home_implied) * edge_boost
+        away_cover_prob = 1 - home_cover_prob
 
-        if home_edge >= self.min_edge_spread:
-            # Calculate enhanced confidence
-            confidence_tier, confidence_factors = self.get_enhanced_confidence(
-                edge=home_edge,
-                bet_type=BetType.SPREAD,
+        # Market implied probs (for display only)
+        home_implied = self.american_to_implied_prob(market.best_spread_home_odds)
+        away_implied = self.american_to_implied_prob(market.best_spread_away_odds)
+
+        # NEW LOGIC: Check if model is confident enough in a WIN, not just value
+        # Only recommend the bet where model has highest confidence
+
+        if home_cover_prob >= self.min_win_prob_spread:
+            # Model says home team covers with high confidence
+            # Calculate confidence based on how much above threshold
+            confidence_tier, confidence_factors = self._get_win_prob_confidence(
                 model_prob=home_cover_prob,
-                market_implied_prob=home_implied,
+                bet_type=BetType.SPREAD,
                 stat_comparison=stat_comparison,
-                kenpom_prediction=kenpom_prob,
-                ml_prediction=ml_prob,
                 situational=situational,
-                line_movement=line_movement,
                 home_stats=home_stats,
                 away_stats=away_stats
             )
 
-            # Cap edge and EV to prevent unrealistic displays from data discrepancies
-            raw_ev = self.calculate_ev(home_cover_prob, market.best_spread_home_odds)
-            capped_edge, capped_ev = self.cap_edge_and_ev(home_edge, raw_ev)
+            # Edge and EV are still displayed but not used for selection
+            edge = home_cover_prob - home_implied
+            ev = self.calculate_ev(home_cover_prob, market.best_spread_home_odds)
+            capped_edge, capped_ev = self.cap_edge_and_ev(edge, ev)
 
             values.append(ValueBet(
                 home_team=prediction.home_team,
@@ -2364,37 +2485,28 @@ class ValueCalculator:
                 market_implied_prob=home_implied,
                 edge=capped_edge,
                 ev=capped_ev,
-                kelly_fraction=self.calculate_kelly(home_cover_prob, market.best_spread_home_odds),
+                kelly_fraction=0.0,  # Kelly removed - not relevant for win-focused approach
                 recommended_book=market.best_spread_home_book,
                 confidence=confidence_tier,
                 confidence_score=confidence_factors.total_score,
                 confidence_factors=confidence_factors.factors_detail
             ))
 
-        # Check away team covering
-        away_cover_prob = 1 - home_cover_prob
-        away_implied = self.american_to_implied_prob(market.best_spread_away_odds)
-        away_edge = (away_cover_prob - away_implied) * edge_boost
-
-        if away_edge >= self.min_edge_spread:
-            # Calculate enhanced confidence
-            confidence_tier, confidence_factors = self.get_enhanced_confidence(
-                edge=away_edge,
-                bet_type=BetType.SPREAD,
+        elif away_cover_prob >= self.min_win_prob_spread:
+            # Model says away team covers with high confidence
+            confidence_tier, confidence_factors = self._get_win_prob_confidence(
                 model_prob=away_cover_prob,
-                market_implied_prob=away_implied,
+                bet_type=BetType.SPREAD,
                 stat_comparison=stat_comparison,
-                kenpom_prediction=1 - kenpom_prob if kenpom_prob else None,
-                ml_prediction=1 - ml_prob if ml_prob else None,
                 situational=situational,
-                line_movement=line_movement,
                 home_stats=home_stats,
                 away_stats=away_stats
             )
 
-            # Cap edge and EV to prevent unrealistic displays from data discrepancies
-            raw_ev = self.calculate_ev(away_cover_prob, market.best_spread_away_odds)
-            capped_edge, capped_ev = self.cap_edge_and_ev(away_edge, raw_ev)
+            # Edge and EV are still displayed but not used for selection
+            edge = away_cover_prob - away_implied
+            ev = self.calculate_ev(away_cover_prob, market.best_spread_away_odds)
+            capped_edge, capped_ev = self.cap_edge_and_ev(edge, ev)
 
             values.append(ValueBet(
                 home_team=prediction.home_team,
@@ -2408,7 +2520,7 @@ class ValueCalculator:
                 market_implied_prob=away_implied,
                 edge=capped_edge,
                 ev=capped_ev,
-                kelly_fraction=self.calculate_kelly(away_cover_prob, market.best_spread_away_odds),
+                kelly_fraction=0.0,  # Kelly removed
                 recommended_book=market.best_spread_away_book,
                 confidence=confidence_tier,
                 confidence_score=confidence_factors.total_score,
@@ -2551,14 +2663,20 @@ class ValueCalculator:
         ml_win_prob: Optional[float] = None,
         line_movement: Optional[Dict[str, float]] = None
     ) -> List[ValueBet]:
-        """Check for moneyline betting value with matchup adjustment."""
+        """
+        Check for moneyline betting opportunities based on WIN PROBABILITY.
+
+        OVERHAUL: No longer uses edge-based value calculation.
+        Instead, recommends bets where the model predicts high win probability.
+        The goal is WINNERS not value.
+        """
         values = []
 
-        # Need valid moneyline odds to calculate value
+        # Need valid moneyline odds
         if market.best_ml_home_odds == 0 or market.best_ml_away_odds == 0:
             return values
 
-        # Extract team stats for enhanced confidence scoring
+        # Extract team stats for confidence scoring
         home_stats = None
         away_stats = None
         stat_comparison = None
@@ -2567,29 +2685,28 @@ class ValueCalculator:
             home_stats = prediction.stat_comparison.home_stats
             away_stats = prediction.stat_comparison.away_stats
 
-        # Check home moneyline with edge boost
+        # Market implied probs (for display only)
         home_implied = self.american_to_implied_prob(market.best_ml_home_odds)
-        home_edge = (prediction.home_win_prob - home_implied) * edge_boost
+        away_implied = self.american_to_implied_prob(market.best_ml_away_odds)
 
-        if home_edge >= self.min_edge_ml:
-            # Calculate enhanced confidence
-            confidence_tier, confidence_factors = self.get_enhanced_confidence(
-                edge=home_edge,
-                bet_type=BetType.MONEYLINE,
+        # NEW LOGIC: Check if model is confident enough in a WIN
+        # Only recommend ONE side - the one the model is most confident in
+
+        if prediction.home_win_prob >= self.min_win_prob_ml:
+            # Model says home team wins with high confidence
+            confidence_tier, confidence_factors = self._get_win_prob_confidence(
                 model_prob=prediction.home_win_prob,
-                market_implied_prob=home_implied,
+                bet_type=BetType.MONEYLINE,
                 stat_comparison=stat_comparison,
-                kenpom_prediction=kenpom_win_prob,
-                ml_prediction=ml_win_prob,
                 situational=situational,
-                line_movement=line_movement,
                 home_stats=home_stats,
                 away_stats=away_stats
             )
 
-            # Cap edge and EV to prevent unrealistic displays from data discrepancies
-            raw_ev = self.calculate_ev(prediction.home_win_prob, market.best_ml_home_odds)
-            capped_edge, capped_ev = self.cap_edge_and_ev(home_edge, raw_ev)
+            # Edge and EV are still displayed but not used for selection
+            edge = prediction.home_win_prob - home_implied
+            ev = self.calculate_ev(prediction.home_win_prob, market.best_ml_home_odds)
+            capped_edge, capped_ev = self.cap_edge_and_ev(edge, ev)
 
             values.append(ValueBet(
                 home_team=prediction.home_team,
@@ -2603,36 +2720,28 @@ class ValueCalculator:
                 market_implied_prob=home_implied,
                 edge=capped_edge,
                 ev=capped_ev,
-                kelly_fraction=self.calculate_kelly(prediction.home_win_prob, market.best_ml_home_odds),
+                kelly_fraction=0.0,  # Kelly removed - not relevant for win-focused approach
                 recommended_book=market.best_ml_home_book,
                 confidence=confidence_tier,
                 confidence_score=confidence_factors.total_score,
                 confidence_factors=confidence_factors.factors_detail
             ))
 
-        # Check away moneyline with edge boost
-        away_implied = self.american_to_implied_prob(market.best_ml_away_odds)
-        away_edge = (prediction.away_win_prob - away_implied) * edge_boost
-
-        if away_edge >= self.min_edge_ml:
-            # Calculate enhanced confidence
-            confidence_tier, confidence_factors = self.get_enhanced_confidence(
-                edge=away_edge,
-                bet_type=BetType.MONEYLINE,
+        elif prediction.away_win_prob >= self.min_win_prob_ml:
+            # Model says away team wins with high confidence
+            confidence_tier, confidence_factors = self._get_win_prob_confidence(
                 model_prob=prediction.away_win_prob,
-                market_implied_prob=away_implied,
+                bet_type=BetType.MONEYLINE,
                 stat_comparison=stat_comparison,
-                kenpom_prediction=1 - kenpom_win_prob if kenpom_win_prob else None,
-                ml_prediction=1 - ml_win_prob if ml_win_prob else None,
                 situational=situational,
-                line_movement=line_movement,
                 home_stats=home_stats,
                 away_stats=away_stats
             )
 
-            # Cap edge and EV to prevent unrealistic displays from data discrepancies
-            raw_ev = self.calculate_ev(prediction.away_win_prob, market.best_ml_away_odds)
-            capped_edge, capped_ev = self.cap_edge_and_ev(away_edge, raw_ev)
+            # Edge and EV are still displayed but not used for selection
+            edge = prediction.away_win_prob - away_implied
+            ev = self.calculate_ev(prediction.away_win_prob, market.best_ml_away_odds)
+            capped_edge, capped_ev = self.cap_edge_and_ev(edge, ev)
 
             values.append(ValueBet(
                 home_team=prediction.home_team,
@@ -2646,7 +2755,7 @@ class ValueCalculator:
                 market_implied_prob=away_implied,
                 edge=capped_edge,
                 ev=capped_ev,
-                kelly_fraction=self.calculate_kelly(prediction.away_win_prob, market.best_ml_away_odds),
+                kelly_fraction=0.0,  # Kelly removed
                 recommended_book=market.best_ml_away_book,
                 confidence=confidence_tier,
                 confidence_score=confidence_factors.total_score,
